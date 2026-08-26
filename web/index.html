@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SuperPhoto · 诊断 · 配方 · 裁决</title>
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,480;9..144,600&family=Outfit:wght@320;400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css?v=5" />
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+    <header class="top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <div>
+          <strong>SuperPhoto</strong>
+          <span>诊断 · 配方 · 裁决</span>
+        </div>
+      </div>
+      <div class="health" id="health">正在检查引擎…</div>
+    </header>
+
+    <main>
+      <section id="drop-stage" class="stage">
+        <form id="drop" class="drop" tabindex="0">
+          <input id="file" type="file" accept=".jpg,.jpeg,.png,.tif,.tiff,.arw,.cr2,.cr3,.nef,.dng,.raf,.orf,.rw2,.pef,.srw,.raw" hidden />
+          <p class="kicker">把一张照片放进来</p>
+          <h1>先看它缺什么，再决定味道</h1>
+          <p class="lede">
+            本地分析曝光与色彩，AI 给出问题清单，然后用三套可解释的后期配方出图。
+            你来选哪一张更像你要的。RAW 优先，JPEG 也能跑。
+          </p>
+          <button type="button" class="btn primary" id="pick">选择文件</button>
+          <p class="hint">支持 JPEG / TIFF / PNG / 常见 RAW · 单张不超过 80MB</p>
+        </form>
+      </section>
+
+      <section id="work-stage" class="stage hidden">
+        <div class="progress-card" id="progress-card">
+          <div class="progress-copy">
+            <p class="kicker" id="progress-kicker">处理中</p>
+            <h2 id="progress-title">正在读取底片</h2>
+            <p id="progress-file" class="filename"></p>
+          </div>
+          <ol class="steps" id="steps">
+            <li data-step="ingest">读取</li>
+            <li data-step="analyze">分析</li>
+            <li data-step="critique">诊断</li>
+            <li data-step="render">渲染</li>
+            <li data-step="qa">自检</li>
+          </ol>
+        </div>
+      </section>
+
+      <section id="result-stage" class="stage hidden">
+        <div class="result-grid">
+          <aside class="diag">
+            <div class="panel">
+              <p class="kicker">原片</p>
+              <figure class="orig">
+                <img id="orig-img" alt="未处理预览" />
+              </figure>
+              <p class="filename" id="orig-name"></p>
+            </div>
+            <div class="panel">
+              <p class="kicker">诊断</p>
+              <h2 id="summary"></h2>
+              <p class="genre" id="genre"></p>
+              <ul class="issues" id="issues"></ul>
+              <div class="chips" id="tech-chips"></div>
+              <div class="donot" id="donot"></div>
+            </div>
+          </aside>
+
+          <section class="studio">
+            <div class="studio-head">
+              <div>
+                <p class="kicker">三套配方</p>
+                <h2>选一张你更想留下的</h2>
+              </div>
+              <p class="taste" id="taste"></p>
+            </div>
+            <div class="hero-compare" id="hero-compare">
+              <figure>
+                <img id="hero-orig" alt="原片" />
+                <figcaption>原片</figcaption>
+              </figure>
+              <figure>
+                <img id="hero-edit" alt="后期" />
+                <figcaption>
+                  <span id="hero-label">方案</span>
+                  <button type="button" class="hold-orig" id="hold-orig">按住看原片</button>
+                </figcaption>
+              </figure>
+            </div>
+            <p class="compare-hint">点选下方方案。按住右侧照片或空格，对照原片看后期差了多少。</p>
+            <div class="variants" id="variants"></div>
+            <div class="judge hidden" id="judge">
+              <p class="kicker">给系统一点反馈</p>
+              <div class="scores">
+                <label>技术 <span data-score="technical"></span>
+                  <input type="range" min="1" max="5" value="4" id="score-technical" />
+                </label>
+                <label>味道 <span data-score="style"></span>
+                  <input type="range" min="1" max="5" value="4" id="score-style" />
+                </label>
+                <label>克制 <span data-score="restraint"></span>
+                  <input type="range" min="1" max="5" value="4" id="score-restraint" />
+                </label>
+              </div>
+              <textarea id="notes" rows="2" placeholder="可选：哪里过了，哪里还不够…"></textarea>
+              <div class="judge-actions">
+                <button class="btn primary" id="submit">确认这张更好</button>
+                <button class="btn ghost" id="again">再来一张</button>
+              </div>
+              <p class="ok hidden" id="thanks"></p>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="error-stage" class="stage hidden">
+        <div class="panel error-panel">
+          <p class="kicker">没有跑通</p>
+          <h2 id="error-title">处理失败</h2>
+          <p id="error-body"></p>
+          <button class="btn primary" id="error-reset">返回</button>
+        </div>
+      </section>
+    </main>
+    <script src="./app.js?v=5"></script>
+  </body>
+</html>

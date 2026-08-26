@@ -1,0 +1,12 @@
+#!/bin/bash
+export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
+export HOME="${HOME}"
+export SUPERPHOTO_DATA_DIR="/Users/dextermosby/Desktop/Projects/SuperPhotoEditing/data"
+export PYTHONPATH="/Users/dextermosby/Desktop/Projects/SuperPhotoEditing/src:/Users/dextermosby/Desktop/Projects/SuperPhotoEditing/.venv/lib/python3.12/site-packages"
+cd "/Users/dextermosby/Desktop/Projects/SuperPhotoEditing" || exit 1
+mkdir -p "$HOME/Library/Logs"
+ls "/Users/dextermosby/Desktop/Projects/SuperPhotoEditing/web/index.html" >/dev/null 2>&1 || true
+if [ -x "/usr/bin/open" ]; then
+  open -a Ollama >/dev/null 2>&1 || true
+fi
+exec "/Users/dextermosby/.local/share/uv/python/cpython-3.12.10-macos-aarch64-none/bin/python3.12" -m superphoto.desktop >> "$HOME/Library/Logs/SuperPhoto.log" 2>&1
