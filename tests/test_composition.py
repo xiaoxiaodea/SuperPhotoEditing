@@ -53,6 +53,25 @@ def test_centered_flat_scene_does_not_demand_crop() -> None:
     assert geom.is_noop() or (geom.crop_right - geom.crop_left) > 0.84
 
 
+def test_slot_a_keeps_original_frame(scene) -> None:
+    linear, _ = load_linear(scene)
+    tech = analyze(linear, scene)
+    critique = local_critique(tech)
+    critique.geometry = GeometryHint(rotate_deg=2.0, apply=True, why="vlm guess")
+    plans = build_plans(compose_look_ids(critique, [], tech), critique, tech)
+    assert plans[0].geometry.is_noop()
+
+
+def test_rotate_covers_empty_corners() -> None:
+    rgb = np.full((80, 120, 3), 0.4, dtype=np.float32)
+    rgb[:8] = 0.9
+    geom = GeometryHint(rotate_deg=2.0, apply=True)
+    out = apply_geometry(rgb, geom)
+    # Rotating 2° without a cover crop would leave black triangles.
+    corner = float(out[0, 0].mean())
+    assert corner > 0.05
+
+
 def test_apply_geometry_crops() -> None:
     rgb = np.zeros((80, 100, 3), dtype=np.float32)
     rgb[..., 1] = 0.2

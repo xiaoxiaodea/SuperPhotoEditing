@@ -1,0 +1,64 @@
+{
+  "title": "摄影师案例 · SuperPhoto 实测对照",
+  "subtitle": "配置示例：改善前后尚未填入真实成片，因此默认拒绝生成正式报告。补齐后移除这句说明。",
+  "base_dir": "..",
+  "summary": [
+    "这是配置示例，不是实验结论。observations 和 metrics 应填写实际观察和测量。",
+    "所有相对图片路径以 base_dir 为起点；base_dir 自身相对当前 JSON 文件目录解析。",
+    "baseline 和 improved 均需填写 path、status: exported，并建议提供 engine、evidence_path；不能把本地近似预览当 Lightroom 成片。"
+  ],
+  "cases": [
+    {
+      "id": "kelby-seven-clicks",
+      "title": "草坡与云层",
+      "author": "Scott Kelby",
+      "source_page": "https://lightroomkillertips.com/seven-clicks-to-done-lightroom-before-and-after-step-by-step/",
+      "description": "单张 RAW：观察天空层次、白云亮度与草坡既有明暗关系。",
+      "images": {
+        "original": {
+          "path": ".analysis/master-benchmark-discovery/kelby-seven-clicks/2T3A0962.CR3",
+          "preview_path": ".analysis/master-benchmark-discovery/kelby-seven-clicks/before-tutorial-screen.jpg",
+          "label": "作者教程中的 RAW 起点截图",
+          "kind": "教程截图 / RAW 配对",
+          "roi": [56, 46, 1620, 1088],
+          "source_url": "https://lightroomkillertips.com/wp-content/uploads/2022/12/1-1.jpg",
+          "notes": ["展示作者公开的起点截图；所关联的 CR3 原始素材已保留，但截图不能视作传感器数据本身。"]
+        },
+        "baseline": null,
+        "improved": null,
+        "reference": {
+          "path": ".analysis/master-benchmark-discovery/kelby-seven-clicks/after-tutorial-screen.jpg",
+          "label": "Scott Kelby 教程最终截图",
+          "kind": "教程截图",
+          "roi": [51, 48, 1496, 1011],
+          "source_url": "https://lightroomkillertips.com/wp-content/uploads/2022/12/7-1-2048x1134.jpg",
+          "notes": ["CSS 只显示已核验照片区域，完整截图仍可查看。"]
+        }
+      },
+      "observations": [],
+      "metrics": [
+        {
+          "label": "天空局部曝光",
+          "reference": -1.58,
+          "unit": "EV",
+          "note": "由作者 STEP 5 参数截图读取；这是操作参数，不是像素测量。"
+        },
+        {
+          "label": "天空局部对比",
+          "reference": 36,
+          "note": "由作者 STEP 5 参数截图读取。"
+        },
+        {
+          "label": "天空局部白色",
+          "reference": 72,
+          "note": "由作者 STEP 5 参数截图读取。"
+        }
+      ],
+      "limitations": [
+        "参考只有网页教程截图，色彩管理、压缩和分辨率与实际导出不同。",
+        "作者参考有轻微山脊亮边；不应把这项缺陷当成拟合目标。",
+        "未填写 baseline / improved 表示还没有纳入任何软件实际成片。"
+      ]
+    }
+  ]
+}

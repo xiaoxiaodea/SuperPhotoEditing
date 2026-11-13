@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from functools import lru_cache
+from io import BytesIO
 from typing import Any
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageCms, ImageOps
 
 from .color import srgb_to_linear
 from .models import SourceKind
@@ -59,11 +61,32 @@ def load_linear(path: Path) -> tuple[np.ndarray, dict[str, Any]]:
 def _load_raster(path: Path, kind: SourceKind) -> tuple[np.ndarray, dict[str, Any]]:
     with Image.open(path) as im:
         im = ImageOps.exif_transpose(im)
-        rgb = im.convert("RGB")
+        profile_present = bool(im.info.get("icc_profile"))
+        rgb = image_to_srgb(im)
         arr = np.asarray(rgb, dtype=np.float32) / 255.0
     linear = srgb_to_linear(arr)
-    meta = {"source_kind": kind, "native_width": linear.shape[1], "native_height": linear.shape[0]}
+    meta = {"source_kind": kind, "native_width": linear.shape[1], "native_height": linear.shape[0],
+            "working_color_space": "sRGB", "icc_converted": profile_present}
     return linear, meta
+
+
+@lru_cache(maxsize=1)
+def srgb_profile_bytes() -> bytes:
+    return ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+
+
+def image_to_srgb(image: Image.Image) -> Image.Image:
+    """Honor embedded primaries before interpreting RGB values as sRGB."""
+    profile = image.info.get("icc_profile")
+    if not profile:
+        return image.convert("RGB")
+    try:
+        return ImageCms.profileToProfile(
+            image, ImageCms.ImageCmsProfile(BytesIO(profile)),
+            ImageCms.ImageCmsProfile(BytesIO(srgb_profile_bytes())), outputMode="RGB",
+        )
+    except (ImageCms.PyCMSError, OSError, ValueError) as exc:
+        raise IngestError(f"无法读取照片的 ICC 色彩配置：{exc}") from exc
 
 
 def _load_raw(path: Path) -> tuple[np.ndarray, dict[str, Any]]:
@@ -100,17 +123,14 @@ def downscale_linear(linear: np.ndarray, max_edge: int) -> np.ndarray:
         return linear
     scale = max_edge / edge
     nh, nw = max(1, int(round(h * scale))), max(1, int(round(w * scale)))
-    # Downsample in linear light via 16-bit proxy so LANCZOS stays stable.
-    peak = float(np.percentile(linear, 99.9)) if linear.size else 1.0
-    peak = max(peak, 1.0)
-    u16 = np.clip(linear / peak * 65535.0, 0, 65535).astype(np.uint16)
-    # Pillow RGB is 8-bit; split into two 8-bit images is overkill. Use float box via PIL 8-bit
-    # on a compressed range, then restore. Acceptable for working previews.
-    u8 = (u16 / 257).astype(np.uint8)
-    im = Image.fromarray(u8, mode="RGB")
-    im = im.resize((nw, nh), Image.Resampling.LANCZOS)
-    restored = np.asarray(im, dtype=np.float32) / 255.0 * peak
-    return restored.astype(np.float32)
+    # Float planes preserve deep shadows and scene values above 1.0. An 8-bit
+    # linear proxy erased shadow gradations before diagnosis even began.
+    planes = [
+        np.asarray(Image.fromarray(linear[..., ch].astype(np.float32)).resize(
+            (nw, nh), Image.Resampling.LANCZOS), dtype=np.float32)
+        for ch in range(linear.shape[2])
+    ]
+    return np.maximum(np.stack(planes, axis=-1), 0.0)
 
 
 def read_exif(path: Path) -> dict[str, str]:

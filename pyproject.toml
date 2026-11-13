@@ -20,6 +20,11 @@ dependencies = [
 
 [project.optional-dependencies]
 raw = ["rawpy>=0.24"]
+semantic = [
+  "torch>=2.4",
+  "torchvision>=0.19",
+  "transformers>=4.45",
+]
 dev = ["pytest>=8.3"]
 
 [project.scripts]

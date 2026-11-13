@@ -56,19 +56,42 @@ def apply_recipe(
     if abs(r.saturation) > 1e-4 or abs(r.vibrance) > 1e-4:
         img = _sat_vib(img, r.saturation, r.vibrance)
     img = _grade(img, r)
+    if r.color_grading.model_dump(exclude_none=True):
+        img = _color_wheels(img, r)
     if abs(r.clarity) > 1e-4:
         img = _clarity(img, r.clarity)
     if abs(r.vignette) > 1e-4:
         img = _vignette(img, r.vignette)
     if r.grain > 1e-4:
         img = _grain(img, r.grain)
-    if not r.local.is_noop():
+    if not r.local.is_noop() or r.masks:
         img = apply_local(img, r, layers=layers, technical=technical, clutter_boxes=clutter_boxes)
     img = np.clip(img, 0.0, 1.0)
     return srgb_to_linear(img)
 
 
+def _color_wheels(img: np.ndarray, recipe: Recipe) -> np.ndarray:
+    """Approximate native wheels for previews; final Lightroom pixels take precedence."""
+    import colorsys
+
+    y = luma(img)
+    grading = recipe.color_grading
+    out = img.copy()
+    for prefix, weight in (("shadow", (1-y)**2), ("midtone", 4*y*(1-y)), ("highlight", y**2)):
+        hue = getattr(grading, f"{prefix}_hue") or 0
+        sat = getattr(grading, f"{prefix}_sat") or 0
+        luminance = getattr(grading, f"{prefix}_lum") or 0
+        color = np.array(colorsys.hsv_to_rgb(hue/360, 1, 1), dtype=np.float32)
+        color -= float(color @ np.array([.2126, .7152, .0722]))
+        # Fade at both endpoints to keep pure black and specular white neutral.
+        chroma_weight = weight * (4*y*(1-y))
+        out += chroma_weight[..., None] * color * (sat/100)*.42
+        out += weight[..., None] * (luminance/100)*.15
+    return np.clip(out, 0, 1)
+
+
 def export_srgb_jpeg(linear: np.ndarray, path: Path, quality: int = 92, max_edge: int | None = None) -> None:
+    from .ingest import srgb_profile_bytes
     rgb = linear
     if max_edge is not None:
         from .ingest import downscale_linear
@@ -77,7 +100,8 @@ def export_srgb_jpeg(linear: np.ndarray, path: Path, quality: int = 92, max_edge
     srgb = np.clip(linear_to_srgb(np.maximum(rgb, 0.0)), 0.0, 1.0)
     arr = (srgb * 255.0 + 0.5).astype(np.uint8)
     path.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(arr, mode="RGB").save(path, format="JPEG", quality=quality, optimize=True, subsampling=1)
+    Image.fromarray(arr, mode="RGB").save(path, format="JPEG", quality=quality, optimize=True,
+                                        subsampling=0, icc_profile=srgb_profile_bytes())
 
 
 def _white_balance(rgb: np.ndarray, temperature: float, tint: float) -> np.ndarray:
@@ -199,10 +223,15 @@ def _map_lut(img: np.ndarray, lut: np.ndarray) -> np.ndarray:
 
 def _sat_vib(img: np.ndarray, sat: float, vib: float) -> np.ndarray:
     y = luma(img)[..., None]
-    out = y + (img - y) * (1.0 + sat)
+    # Saturation follows light: unlit regions stay quieter (Gore / 通透).
+    light = np.clip((y - 0.05) / 0.52, 0.0, 1.0)
+    sat_w = light if sat > 0 else np.maximum(light, 0.35)
+    out = y + (img - y) * (1.0 + sat * sat_w)
     if abs(vib) > 1e-4:
         mag = np.linalg.norm(img - y, axis=-1, keepdims=True)
         weight = 1.0 - np.clip(mag * 2.4, 0.0, 1.0)
+        if vib > 0:
+            weight = weight * light
         out = y + (out - y) * (1.0 + vib * weight)
     return np.clip(out, 0.0, 1.0)
 
@@ -225,7 +254,11 @@ def _hsl(img: np.ndarray, recipe: Recipe) -> np.ndarray:
         if abs(shift.hue) > 1e-4:
             h2 = (h2 + (shift.hue / 360.0) * w) % 1.0
         if abs(shift.sat) > 1e-4:
-            s2 = np.clip(s2 * (1.0 + shift.sat * w * 1.15), 0.0, 1.0)
+            if shift.sat > 0:
+                light = np.clip((l - 0.06) / 0.50, 0.0, 1.0)
+                s2 = np.clip(s2 * (1.0 + shift.sat * w * 1.15 * light), 0.0, 1.0)
+            else:
+                s2 = np.clip(s2 * (1.0 + shift.sat * w * 1.15), 0.0, 1.0)
         if abs(shift.lum) > 1e-4:
             l2 = np.clip(l2 + shift.lum * 0.34 * w, 0.0, 1.0)
     if float(np.max(touched)) < 1e-4:

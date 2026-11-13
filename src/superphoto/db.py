@@ -60,6 +60,33 @@ def init_db(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             FOREIGN KEY(job_id) REFERENCES jobs(id)
         );
+        CREATE TABLE IF NOT EXISTS ratings (
+            job_id TEXT NOT NULL REFERENCES jobs(id),
+            slot TEXT NOT NULL CHECK(slot IN ('A','B','C')),
+            verdict INTEGER NOT NULL CHECK(verdict IN (-1,0,1)),
+            method_id TEXT NOT NULL,
+            scene_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(job_id, slot)
+        );
+        CREATE TABLE IF NOT EXISTS refinements (
+            id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL REFERENCES jobs(id),
+            slot TEXT NOT NULL CHECK(slot IN ('A','B','C')),
+            parent_id TEXT REFERENCES refinements(id),
+            prompt TEXT NOT NULL,
+            status TEXT NOT NULL,
+            step TEXT NOT NULL,
+            summary TEXT,
+            error TEXT,
+            recipe_json TEXT,
+            filename TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS refinements_job ON refinements(job_id, created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS refinements_one_active
+            ON refinements(job_id, slot) WHERE status IN ('queued', 'running');
         """
     )
     conn.commit()
@@ -157,7 +184,8 @@ def insert_feedback(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
 def look_stats(conn: sqlite3.Connection) -> dict[str, Any]:
     wins = conn.execute(
         """
-        SELECT look_id, COUNT(*) AS n,
+        SELECT look_id, SUM(CASE WHEN style_score >= 4 AND technical_score >= 3
+                                THEN 1 ELSE 0 END) AS n,
                AVG(technical_score) AS technical,
                AVG(style_score) AS style,
                AVG(restraint_score) AS restraint
@@ -178,3 +206,48 @@ def look_stats(conn: sqlite3.Connection) -> dict[str, Any]:
             for r in wins
         ],
     }
+
+
+def get_ratings(conn: sqlite3.Connection, job_id: str) -> dict[str, str | None]:
+    names = {1: "like", -1: "dislike", 0: None}
+    return {r["slot"]: names[r["verdict"]] for r in conn.execute(
+        "SELECT slot, verdict FROM ratings WHERE job_id = ?", (job_id,))}
+
+
+def set_rating(conn: sqlite3.Connection, job_id: str, slot: str, verdict: int,
+               method_id: str, scene: dict) -> None:
+    # Keep neutral rows as explicit undo markers, including for legacy feedback.
+    conn.execute("""INSERT INTO ratings VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(job_id, slot) DO UPDATE SET verdict=excluded.verdict,
+        method_id=excluded.method_id, scene_json=excluded.scene_json, updated_at=excluded.updated_at""",
+        (job_id, slot, verdict, method_id, json.dumps(scene), utcnow()))
+    conn.commit()
+
+
+def get_refinement(conn: sqlite3.Connection, refinement_id: str) -> dict | None:
+    row = conn.execute("SELECT * FROM refinements WHERE id = ?", (refinement_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_refinements(conn: sqlite3.Connection, job_id: str) -> list[dict]:
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM refinements WHERE job_id = ? ORDER BY created_at, rowid", (job_id,))]
+
+
+def insert_refinement(conn: sqlite3.Connection, refinement_id: str, job_id: str,
+                      slot: str, parent_id: str | None, prompt: str) -> None:
+    conn.execute("""INSERT INTO refinements
+        (id, job_id, slot, parent_id, prompt, status, step, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'queued', 'queued', ?, ?)""",
+        (refinement_id, job_id, slot, parent_id, prompt, utcnow(), utcnow()))
+    conn.commit()
+
+
+def update_refinement(conn: sqlite3.Connection, refinement_id: str, **fields: Any) -> None:
+    allowed = {"status", "step", "summary", "error", "recipe_json", "filename"}
+    if not fields.keys() <= allowed:
+        raise ValueError("Unknown refinement field")
+    fields["updated_at"] = utcnow()
+    conn.execute(f"UPDATE refinements SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
+                 [*fields.values(), refinement_id])
+    conn.commit()

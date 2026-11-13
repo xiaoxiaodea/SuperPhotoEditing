@@ -92,6 +92,7 @@ def analyze(linear: np.ndarray, original_path: Path) -> TechnicalReport:
         highlight_clip=highlight_clip,
         shadow_clip=shadow_clip,
         dynamic_spread=dynamic_spread,
+        black_clip=float(np.mean(np.max(work, axis=-1) <= float(srgb_to_linear(np.array(5.0 / 255.0))))),
         sharpness=sharpness,
         noise=noise,
         saturation_mean=sat_mean,
@@ -145,8 +146,7 @@ def correction_from_technical(tech: TechnicalReport) -> CorrectionHint:
     elif tech.dynamic_spread > 0.75 and tech.highlight_clip > 0.01:
         contrast -= 0.04
 
-    if developed and tech.saturation_mean > 0.35:
-        saturation -= 0.04
+    # High saturation on a JPEG is usually the photograph, not a defect.
 
     # Don't "correct" cyan water, warm skin, or sunsets — those are the photo.
     scenic_color = tech.top_third_blue > 0.18 or tech.green_fraction > 0.16 or tech.skin_fraction > 0.08

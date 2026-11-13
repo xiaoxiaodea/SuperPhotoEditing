@@ -10,6 +10,7 @@ from PIL import Image
 @pytest.fixture(autouse=True)
 def _disable_remote_critics(monkeypatch) -> None:
     monkeypatch.setenv("SUPERPHOTO_OLLAMA_ENABLED", "0")
+    monkeypatch.setenv("SUPERPHOTO_LIGHTROOM_ENABLED", "0")
     monkeypatch.setenv("XAI_API_KEY", "")
 
 

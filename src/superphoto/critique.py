@@ -10,8 +10,9 @@ import numpy as np
 from .analysis import correction_from_technical, guess_genre
 from .composition import clamp_geometry, suggest_geometry
 from .config import Settings
-from .models import CorrectionHint, Critique, GeometryHint, Issue, RegionBox, TechnicalReport
+from .models import CorrectionHint, Critique, EditIntent, GeometryHint, Issue, MaskAdjustment, RegionBox, TechnicalReport
 from .ollama import chat_vision, probe
+from .look_routes import route_legend
 from .preference import look_match, ranked_look_ids
 from .recipes import LOOKS, allowed_look_ids
 
@@ -30,6 +31,15 @@ SCHEMA_HINT = """
   "lut_mix": 0.5,
   "geometry": {"rotate_deg": 0.0, "crop": null, "why": ""},
   "subject_note": "画面主体是什么",
+  "intent": {
+    "goal": "这张照片的视觉重点，以及如何组织人物、前景和远景的关系",
+    "preserve": ["必须保留的现场光色或空间关系"],
+    "natural_color": true, "preserve_atmosphere": true, "preserve_black_depth": true, "locked_controls": [],
+    "subject_box": null, "subject_confidence": 0.0,
+    "masks": [{"target": "subject", "exposure_ev": 0.0, "shadows": 0.0, "highlights": 0.0,
+               "contrast": 0.0, "whites": 0.0, "blacks": 0.0,
+               "temperature": 0.0, "saturation": 0.0, "clarity": 0.0, "reason": "区域问题与处理目的"}]
+  },
   "clutter": [{"box": [0.0, 0.0, 0.2, 0.3], "note": "边缘干扰，可压暗或裁掉"}]
 }
 """
@@ -42,19 +52,24 @@ def critique_photo(
 ) -> Critique:
     local = local_critique(technical)
     status = probe(settings)
-    if status.get("ready") and status.get("resolved_model"):
+    vision_ready = bool(status.get("ready") and status.get("resolved_model"))
+    if vision_ready:
         try:
             remote = ollama_critique(settings, preview_path, technical, status["resolved_model"])
             return _merge_with_local(remote, local)
         except Exception as exc:
-            local.summary = (local.summary + f" （Ollama 诊断失败：{exc}）").strip()
+            local.summary = (local.summary + f" （Ollama 诊断失败：{_format_critique_error(exc)}）").strip()
     if settings.xai_api_key:
         try:
             remote = grok_critique(settings, preview_path, technical)
             return _merge_with_local(remote, local)
         except Exception:
             pass
-    note = "（视觉模型未就绪，已用本地技术分析）"
+    note = (
+        "（视觉模型输出无法使用，已用本地技术分析）"
+        if vision_ready
+        else "（视觉模型未就绪，已用本地技术分析）"
+    )
     if note not in local.summary:
         local.summary = (local.summary + " " + note).strip()
     return local
@@ -91,11 +106,11 @@ def local_critique(technical: TechnicalReport) -> Critique:
                 note="高光偏多，先收回曝光再谈风格。",
             )
         )
-    if technical.shadow_clip > 0.12 and technical.mean_luma < 0.12:
+    if technical.black_clip > 0.12 and technical.mean_luma < 0.12:
         issues.append(
             Issue(
                 dim="shadows",
-                severity=min(1.0, technical.shadow_clip * 3),
+                severity=min(1.0, technical.black_clip * 3),
                 note="阴影丢失细节，适量抬暗部，但不要做成雾蒙蒙的平图。",
             )
         )
@@ -201,30 +216,62 @@ def _look_legend() -> str:
 
 
 def _vlm_prompt(technical: TechnicalReport) -> str:
-    looks = ", ".join(allowed_look_ids())
+    from .style_selection import preset_legend
+    looks = preset_legend()
+    measurements = technical.model_dump(exclude={"histogram", "shadow_clip"})
+    measurements["low_tone_area_not_clipping"] = technical.shadow_clip
     return f"""You are a photography director following published master practice:
 Thomas Heaton (correct highlights, then shadows, then WB; almost never global saturation),
 Ted Gore (do not blast every green; saturate only where light already is; stay inside the context of nature),
 portrait colorists (fix skin WB first; often KEEP shadows for chiaroscuro).
 
-You receive a JPEG preview plus lab measurements.
+You receive a JPEG viewing preview of a {technical.source_kind.upper()} SOURCE plus lab measurements.
+The preview format does not change the source file's adjustment headroom.
 First name the picture's INTENT (low-key pond, open landscape, studio portrait).
 Then say what is actually weak. Separate correction from look.
-Prefer under-correction. Never suggest generative fill or face-changing retouch.
+Inspect each of sky, focal subject, foreground and edges before choosing the main weakness.
+Dark but textured hills are not lost detail. black_clip measures near-black output; low_tone_area_not_clipping
+only describes normal dark tones. Never say shadows are clipped based on that area or a dark-looking thumbnail alone.
+For a pale RAW sky, consider a meaningful recovery rather than lifting the whole photo:
+global highlights -0.3..-0.8 as needed, then sky exposure roughly -0.7..-1.6 with contrast +.15..+.35
+and whites +.2..+.6 to keep clouds luminous. These are conditional recovery options, not a universal preset.
+For a JPEG or an intentionally pale/hazy sky, preserve atmosphere and use smaller local changes.
+The default is natural photographic finishing. First design the visual hierarchy:
+- intent.goal names the focal subject, the light direction and foreground/background relationship.
+- A person in a landscape is still a subject. Do not overlook a dark face because most pixels are bright mountains.
+- Preserve aerial perspective: distant ridges SHOULD be paler and softer than near ridges. Haze is not automatically a defect.
+- Use intent.masks for native Lightroom subject/sky/background masks, at most one per target.
+- Subject exposure typically +0.15..+0.40 EV when needed, background -0.05..-0.20 EV only if it competes.
+- Local exposure normally -0.75..+0.75 EV; a visibly washed-out, recoverable RAW sky may use -2..0 EV
+  with positive local contrast (up to .50) and whites (up to .75) to preserve luminous clouds.
+  For JPEG, subject and background keep contrast/whites within -.30..+.30 and blacks -.25..+.25.
+  Local highlights -0.40..+0.20, shadows -0.25..+0.35,
+  saturation -0.25..+0.15, clarity -0.15..+0.15, temperature -12..+12.
+- Empty masks if they would not help. Do not lift an intentional silhouette. Do not change every color to make an edit visible.
+- subject_box is a normalized object with left/top/right/bottom, or null if uncertain; report subject_confidence.
+- Translate do_not into the intent protection flags. Keep natural_color/preserve_atmosphere/preserve_black_depth true by default.
+- Inspect each named region before writing its preserved color. Reflections can be warm while the
+  surrounding city is cool. Whole-frame temperature_bias does not describe a small reflected highlight.
+  If a region's hue is uncertain, preserve its existing color relationship without inventing a hue.
+- locked_controls explicitly forbids global look moves: allowed names are exposure_ev, temperature, tint, hue, grain, clarity, dehaze.
+Choose a visible, justified improvement in light hierarchy; a tiny edit is not automatically a good edit.
+Do not label a whole hillside as a selectable subject. Never suggest generative fill or face-changing retouch.
 
 JPEG/PNG files are already developed. Be conservative:
 - exposure_ev is usually 0. Never go beyond -0.3..+0.25 on a JPEG.
 - Low-key is a choice. If the subject (flower, face, peak) is already well exposed, leave exposure at 0. Do not lift a dark pond.
 - shadows at most +0.10. highlights at most -0.25.
-- Do not warm cyan glacial water or a cool landscape. That color is the photo.
+- Distinguish ambient light from reflected sunlight; preserve the colors actually visible in each region.
 - Do not raise global saturation. If color is loud, lower it.
 
-Allowed look ids (pick exactly 3, always include "faithful"): {looks}
+Executable presets with their visual character and usage conditions (suggest 3 compatible IDs, no mandatory slot):
+{looks}
 
-Look meanings (pick 3 that match the picture; always include faithful):
-{_look_legend()}
-
-LUT / XMP packs are REFERENCES, never apply at 100%.
+Choose from the scene's subject, light, palette and intended mood, not just its genre or a famous name.
+Warm earth is not skin, a dark daylight picture is not necessarily night, and buildings behind a person
+do not make the subject architectural. Different photographs may need entirely different preset families.
+These recommendations enter preset ranking; diagnosis and local light come first.
+LUT / XMP packs are REFERENCES, never apply at 100%. Do not pick a look just because the title is cinematic.
 - lut_mix is 0.3-0.7: how much of the look to keep after you read THIS picture.
 - If the photo is already saturated, contrasty, or a finished JPEG, stay near 0.35-0.5.
 - Drop LUT pieces that fight the scene (don't khaki a lush green pond; don't orange a landscape).
@@ -240,10 +287,12 @@ Correction units (same as Lightroom-like sliders, 0 = no-op):
 - temperature: -30..30, positive = warmer
 - highlights/shadows/whites/blacks/contrast/saturation/vibrance/clarity/dehaze: about -1..1
 
-Technical measurements (trust these over your eyes for clipping and exposure):
-{json.dumps({k: v for k, v in technical.model_dump().items() if k != "histogram"}, ensure_ascii=False, indent=2)}
+Technical measurements (use black_clip/highlight_clip to distinguish clipping from ordinary dark/bright tones;
+mean exposure is not an artistic target):
+{json.dumps(measurements, ensure_ascii=False, indent=2)}
 
-Return JSON only, matching this shape (Chinese for summary/notes/do_not):
+/no_think
+Return JSON only, matching this shape (Chinese for summary/notes/do_not). No markdown, no commentary:
 {SCHEMA_HINT}
 """
 
@@ -328,20 +377,29 @@ def compose_look_ids(
                 break
             if ok(look_id):
                 picked.append(look_id)
-    for fallback in (
-        "five_cm",
-        "skam",
-        "kdrama_tears",
-        "landscape_filmic",
-        "filmic_portrait_warm",
-        "cinematic_teal_orange",
-        "dune",
-    ):
+    for fallback in _fallbacks_for(critique.genre):
+        if len(picked) == 3:
+            break
+        if fallback not in picked and fallback in allowed and ok(fallback):
+            picked.append(fallback)
+    for fallback in _fallbacks_for(critique.genre):
         if len(picked) == 3:
             break
         if fallback not in picked and fallback in allowed:
             picked.append(fallback)
     return picked[:3]
+
+
+def _fallbacks_for(genre: str) -> tuple[str, ...]:
+    return {
+        "landscape": ("landscape_filmic", "dune", "five_cm", "moody_lowkey"),
+        "portrait": ("filmic_portrait_warm", "kdrama_tears", "romance_gold", "editorial_crisp"),
+        "street": ("cinematic_teal_orange", "skam", "wong_kar_wai", "moody_lowkey"),
+        "night": ("moody_lowkey", "cinematic_teal_orange", "hanabi", "tokyo_ghoul"),
+        "indoor": ("filmic_portrait_warm", "kdrama_tears", "unnatural"),
+        "product": ("editorial_crisp", "filmic_portrait_warm"),
+        "general": ("landscape_filmic", "filmic_portrait_warm", "cinematic_teal_orange"),
+    }.get(genre, ("landscape_filmic", "filmic_portrait_warm", "cinematic_teal_orange"))
 
 
 def _looks_for_genre(genre: str, technical: TechnicalReport) -> list[str]:
@@ -354,7 +412,7 @@ def _looks_for_genre(genre: str, technical: TechnicalReport) -> list[str]:
         picked.append(look_id)
         if len(picked) == 3:
             break
-    for look_id in ("five_cm", "skam", "filmic_portrait_warm", "landscape_filmic"):
+    for look_id in _fallbacks_for(genre):
         if len(picked) == 3:
             break
         if look_id not in picked and look_id in allowed:
@@ -378,22 +436,18 @@ def _summary(genre: str, issues: list[Issue], technical: TechnicalReport) -> str
 
 
 def _merge_with_local(remote: Critique, local: Critique) -> Critique:
-    # Keep Grok's language; clamp looks; if correction is all zeros, use local lab.
+    # A deliberate zero adjustment is valid. Do not replace the photographer's
+    # decision to preserve exposure or framing with histogram heuristics.
     looks = [lid for lid in remote.looks if lid in LOOKS]
     if "faithful" not in looks:
         looks = ["faithful", *looks]
     remote.looks = looks[:4] or local.looks
-    corr = remote.correction
-    if all(abs(v) < 1e-6 for v in corr.model_dump().values()):
-        remote.correction = local.correction
     if not remote.issues:
         remote.issues = local.issues
     if not remote.summary:
         remote.summary = local.summary
     remote.lut_mix = float(np.clip(remote.lut_mix or local.lut_mix, 0.28, 0.75))
-    if not remote.geometry.apply:
-        remote.geometry = local.geometry
-    else:
+    if remote.geometry.apply:
         remote.geometry = clamp_geometry(remote.geometry)
     if not remote.clutter:
         remote.clutter = local.clutter
@@ -442,7 +496,39 @@ def _critique_from_dict(data: dict[str, Any], source: str) -> Critique:
         geometry=geometry,
         clutter=clutter,
         subject_note=str(data.get("subject_note") or ""),
+        intent=_intent_from_dict(data.get("intent")),
     )
+
+
+def _intent_from_dict(raw: object) -> EditIntent:
+    if not isinstance(raw, dict):
+        return EditIntent()
+    data = dict(raw)
+    masks = []
+    raw_masks = data.pop("masks", [])
+    for item in raw_masks if isinstance(raw_masks, list) else []:
+        try:
+            mask = MaskAdjustment.model_validate(item)
+            if not mask.is_noop() and mask.target not in {m.target for m in masks}:
+                masks.append(mask)
+        except (ValueError, TypeError):
+            continue
+    # An invalid optional box must not discard the goal or color protections.
+    valid = {}
+    for key, value in data.items():
+        if key not in EditIntent.model_fields:
+            continue
+        try:
+            EditIntent.model_validate({key: value})
+            valid[key] = value
+        except (ValueError, TypeError):
+            continue
+    intent = EditIntent.model_validate(valid)
+    if data.get("subject_confidence") == 0 and intent.subject_box is None:
+        # An explicit absence of a selectable object cannot support a native
+        # subject mask (or its inverse). Empty selections can also block LR's UI.
+        masks = [m for m in masks if m.target == "sky"]
+    return intent.model_copy(update={"masks": masks[:3]})
 
 
 def _clutter_from_dict(raw: object) -> list[RegionBox]:
@@ -516,15 +602,156 @@ def _geometry_from_dict(raw: object) -> GeometryHint:
     )
 
 
+def _format_critique_error(exc: Exception) -> str:
+    msg = str(exc)
+    if isinstance(exc, json.JSONDecodeError) or any(
+        token in msg for token in ("Expecting", "Unterminated", "delimiter", "no JSON")
+    ):
+        return "模型输出不是完整 JSON（多半被截断）"
+    if len(msg) > 120:
+        return msg[:117] + "…"
+    return msg
+
+
+_SMART_QUOTES = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"})
+
+
 def _extract_json(text: str) -> dict[str, Any]:
-    text = text.strip()
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("no JSON object in model output")
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
+        text = re.sub(r"\s*```.*$", "", text, flags=re.DOTALL)
+    start = text.find("{")
+    if start < 0:
         raise ValueError("no JSON object in model output")
-    return json.loads(match.group(0))
+    blob = text[start:].strip()
+    for candidate in (blob, _repair_json(blob)):
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and data:
+            return data
+    raise ValueError("no JSON object in model output")
+
+
+def _repair_json(text: str) -> str:
+    """Close a truncated JSON object, keeping the last complete value."""
+    s = text.strip().translate(_SMART_QUOTES)
+    in_str = False
+    esc = False
+    stack: list[str] = []
+    complete_at = 0
+    i = 0
+    n = len(s)
+
+    def after_value(pos: int) -> None:
+        nonlocal complete_at
+        complete_at = pos
+
+    while i < n:
+        ch = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+                if stack and stack[-1] == "{key":
+                    stack[-1] = "{val"
+                else:
+                    after_value(i + 1)
+            i += 1
+            continue
+        if ch.isspace():
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True
+            i += 1
+            continue
+        if ch == "{":
+            stack.append("{key")
+            i += 1
+            continue
+        if ch == "[":
+            stack.append("[")
+            i += 1
+            continue
+        if ch == "}":
+            if stack and stack[-1] in {"{key", "{val"}:
+                stack.pop()
+                after_value(i + 1)
+            i += 1
+            continue
+        if ch == "]":
+            if stack and stack[-1] == "[":
+                stack.pop()
+                after_value(i + 1)
+            i += 1
+            continue
+        if ch == ":":
+            i += 1
+            continue
+        if ch == ",":
+            if stack and stack[-1] == "{val":
+                stack[-1] = "{key"
+            i += 1
+            continue
+        if ch in "tfn":
+            for word in ("true", "false", "null"):
+                if s.startswith(word, i):
+                    after_value(i + len(word))
+                    i += len(word)
+                    break
+            else:
+                break
+            continue
+        if ch == "-" or ch.isdigit():
+            j = i + 1
+            while j < n and s[j] in "0123456789.eE+-":
+                j += 1
+            token = s[i:j]
+            if not token or token[-1] in ".eE+-":
+                break
+            after_value(j)
+            i = j
+            continue
+        break
+
+    prefix = s[:complete_at].rstrip()
+    prefix = re.sub(r",\s*$", "", prefix)
+    if not prefix:
+        return "{}"
+    return prefix + _unclosed_suffix(prefix)
+
+
+def _unclosed_suffix(text: str) -> str:
+    stack: list[str] = []
+    in_str = False
+    esc = False
+    for ch in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            stack.append("}")
+        elif ch == "[":
+            stack.append("]")
+        elif ch in "}]" and stack and stack[-1] == ch:
+            stack.pop()
+    return "".join(reversed(stack))
 
 
 def _output_text_fallback(response: Any) -> str:

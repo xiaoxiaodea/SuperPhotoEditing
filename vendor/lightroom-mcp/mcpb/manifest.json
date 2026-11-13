@@ -1,0 +1,195 @@
+{
+  "manifest_version": "0.3",
+  "name": "lightroom-mcp",
+  "display_name": "Lightroom Classic",
+  "version": "0.13.0",
+  "description": "Bridge Claude to Adobe Lightroom Classic \u2014 search, organize, develop, export.",
+  "long_description": "Connects Claude to a running Adobe Lightroom Classic instance via a bundled Lua plugin. Tools cover catalog search, collections, ratings, keywords, develop presets and settings, import and export. The Lightroom plugin is auto-installed into Lightroom's Modules folder on first run; restart Lightroom once after install to load it.",
+  "author": {
+    "name": "Marcin Skalski"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Automaat/lightroom-mcp"
+  },
+  "license": "MIT",
+  "keywords": [
+    "lightroom",
+    "lightroom-classic",
+    "photography",
+    "adobe"
+  ],
+  "server": {
+    "type": "node",
+    "entry_point": "server/dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/dist/index.js"
+      ],
+      "env": {
+        "LIGHTROOM_MCP_REQUEST_PORT": "${user_config.request_port}",
+        "LIGHTROOM_MCP_RESPONSE_PORT": "${user_config.response_port}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "search_photos",
+      "description": "Search the catalog by metadata, EXIF, location, flag, label, edit state, or date."
+    },
+    {
+      "name": "get_catalog_info",
+      "description": "Active catalog path, Lightroom version, and photo/collection counts."
+    },
+    {
+      "name": "list_folders",
+      "description": "Folders in the catalog with their on-disk paths and hierarchy."
+    },
+    {
+      "name": "list_keywords",
+      "description": "The catalog's keyword hierarchy, with synonyms and export flags."
+    },
+    {
+      "name": "get_photo_preview",
+      "description": "Render a JPEG preview of a photo to inspect how it actually looks."
+    },
+    {
+      "name": "get_selected_photos",
+      "description": "Photos currently selected in Lightroom (or the filmstrip)."
+    },
+    {
+      "name": "set_selected_photos",
+      "description": "Select photos in the Lightroom UI so the user can see a result set."
+    },
+    {
+      "name": "get_photo_metadata",
+      "description": "Detailed EXIF + develop metadata for a photo."
+    },
+    {
+      "name": "set_photo_metadata",
+      "description": "Write IPTC/XMP fields: title, caption, creator, copyright, location, GPS."
+    },
+    {
+      "name": "set_flag",
+      "description": "Set the pick / unflag / reject flag on photos."
+    },
+    {
+      "name": "set_color_label",
+      "description": "Set or clear the color label on photos."
+    },
+    {
+      "name": "list_collections",
+      "description": "All collections, with full set paths and photo counts."
+    },
+    {
+      "name": "list_collection_sets",
+      "description": "Collection sets, for use as a parent when creating collections."
+    },
+    {
+      "name": "get_collection_photos",
+      "description": "List the photos inside one collection."
+    },
+    {
+      "name": "create_collection",
+      "description": "Create a collection, optionally inside a collection set."
+    },
+    {
+      "name": "create_collection_set",
+      "description": "Create a collection set to group collections."
+    },
+    {
+      "name": "create_smart_collection",
+      "description": "Create a self-updating smart collection from search criteria."
+    },
+    {
+      "name": "add_to_collection",
+      "description": "Add photos to a collection."
+    },
+    {
+      "name": "remove_from_collection",
+      "description": "Remove photos from a collection (photos stay in the catalog)."
+    },
+    {
+      "name": "rename_collection",
+      "description": "Rename an existing collection."
+    },
+    {
+      "name": "delete_collection",
+      "description": "Delete a collection (photos stay in the catalog)."
+    },
+    {
+      "name": "set_keywords",
+      "description": "Add or remove keywords on photos."
+    },
+    {
+      "name": "set_rating",
+      "description": "Set the star rating on photos."
+    },
+    {
+      "name": "import_photos",
+      "description": "Import photos from a path into the catalog."
+    },
+    {
+      "name": "export_photos",
+      "description": "Export photos to a destination folder."
+    },
+    {
+      "name": "list_develop_presets",
+      "description": "Lightroom-visible presets and plugin-managed checkpoints."
+    },
+    {
+      "name": "get_develop_preset",
+      "description": "Settings and backing-file metadata for one preset."
+    },
+    {
+      "name": "compare_develop_presets",
+      "description": "Deterministic per-setting diff between two presets."
+    },
+    {
+      "name": "create_develop_preset",
+      "description": "Capture a versioned preset checkpoint from a photo."
+    },
+    {
+      "name": "export_develop_preset",
+      "description": "Copy a preset's backing file to a destination directory."
+    },
+    {
+      "name": "apply_develop_preset",
+      "description": "Apply a Develop preset to photos."
+    },
+    {
+      "name": "copy_develop_settings",
+      "description": "Copy Develop settings from one photo to others."
+    },
+    {
+      "name": "set_develop_settings",
+      "description": "Set Develop settings directly on a photo."
+    }
+  ],
+  "user_config": {
+    "request_port": {
+      "type": "string",
+      "title": "Plugin request port",
+      "description": "TCP port the Lightroom plugin listens on for requests. Must match the Plug-in Manager setting.",
+      "default": "58763",
+      "required": false
+    },
+    "response_port": {
+      "type": "string",
+      "title": "Plugin response port",
+      "description": "TCP port the Lightroom plugin sends responses on. Must match the Plug-in Manager setting.",
+      "default": "58764",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32"
+    ],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  }
+}

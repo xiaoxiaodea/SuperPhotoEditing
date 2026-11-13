@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 from PIL import Image, ImageFilter
 
 from .color import luma, rgb_to_hsl, smoothstep
 from .models import RegionBox, TechnicalReport
+
+if TYPE_CHECKING:
+    from .semantic import SemanticMasks
 
 
 @dataclass
@@ -27,6 +32,7 @@ def build_layers(
     srgb: np.ndarray,
     technical: TechnicalReport | None = None,
     clutter_boxes: list[RegionBox] | None = None,
+    semantic: "SemanticMasks | None" = None,
 ) -> LayerMasks:
     img = np.clip(srgb.astype(np.float32, copy=False), 0.0, 1.0)
     h, w = img.shape[:2]
@@ -67,6 +73,16 @@ def build_layers(
         subject *= smoothstep(0.35, 0.02, dist)
     subject = _feather(subject, 11)
     subject = np.clip(subject, 0.0, 1.0)
+
+    # Semantic masks lead when the optional model is available. The heuristic
+    # masks remain as low-weight detail so textured subjects do not become flat.
+    if semantic is not None and semantic.confidence >= 0.20:
+        subject = np.maximum(semantic.subject, subject * 0.24)
+        sky = np.maximum(semantic.sky, sky * 0.18)
+        foliage = np.maximum(semantic.foliage, foliage * 0.22)
+        water = np.maximum(semantic.water, water * 0.20)
+        # The semantic person mask protects a region; hue still identifies skin.
+        skin = np.maximum(skin * semantic.skin, skin * 0.12)
 
     sky = _feather(sky * (1.0 - 0.65 * subject), 10)
     foliage = _feather(foliage, 6)

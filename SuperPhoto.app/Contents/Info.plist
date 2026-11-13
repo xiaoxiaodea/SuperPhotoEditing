@@ -13,8 +13,15 @@
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>LSEnvironment</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/dextermosby/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticTermination</key><false/>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>SuperPhoto 需要打开本机的 Ollama。</string>
   <key>NSDesktopFolderUsageDescription</key>
   <string>SuperPhoto 需要读取桌面上的照片和项目文件。</string>
   <key>NSDocumentsFolderUsageDescription</key>
@@ -23,5 +30,12 @@
   <string>SuperPhoto 需要读取下载文件夹中的照片。</string>
   <key>NSRemovableVolumesUsageDescription</key>
   <string>SuperPhoto 需要读取存储卡上的 RAW 照片。</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>SuperPhoto 需要连接本机引擎来显示后期界面。</string>
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key><true/>
+    <key>NSAllowsArbitraryLoads</key><true/>
+  </dict>
 </dict>
 </plist>

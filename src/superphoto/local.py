@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image, ImageFilter
 
-from .color import circular_mean_hue, hue_weights, luma, rgb_to_hsl, hsl_to_rgb
+from .color import circular_mean_hue, hue_weights, luma, rgb_to_hsl, hsl_to_rgb, linear_to_srgb, srgb_to_linear
 from .layers import LayerMasks, build_layers
 from .models import LocalEdit, Recipe, RegionBox, TechnicalReport
 
@@ -23,7 +23,12 @@ def apply_local(
     clutter_boxes: list[RegionBox] | None = None,
 ) -> np.ndarray:
     loc = recipe.local
-    if loc.is_noop():
+    # Explicit per-picture intent replaces, rather than doubles, an automatic
+    # heuristic for the same region, matching the Lightroom mask adapter.
+    groups = {"subject": ("subject_lift", "subject_vibrance", "subject_clarity", "subject_sharpen"),
+              "sky": ("sky_dehaze",), "background": ("background_darken", "background_desat")}
+    loc = loc.model_copy(update={key: 0.0 for adjustment in recipe.masks for key in groups[adjustment.target]})
+    if loc.is_noop() and not recipe.masks:
         return img
     img = np.clip(img.astype(np.float32, copy=True), 0.0, 1.0)
     if layers is None:
@@ -41,6 +46,29 @@ def apply_local(
         out = _clutter(out, layers.clutter, loc.clutter_suppress)
     if loc.subject_lift or loc.subject_vibrance or loc.subject_clarity or loc.subject_sharpen:
         out = _subject(out, layers.subject, loc)
+    for adjustment in recipe.masks:
+        mask = getattr(layers, adjustment.target)
+        from .render import _white_balance, _highlights_whites, _shadows_blacks, _dehaze, _contrast
+
+        adjusted = srgb_to_linear(out)
+        adjusted = _white_balance(adjusted, adjustment.temperature, adjustment.tint)
+        adjusted = linear_to_srgb(adjusted * (2.0 ** adjustment.exposure_ev))
+        adjusted = _highlights_whites(adjusted, adjustment.highlights, adjustment.whites)
+        adjusted = _shadows_blacks(adjusted, adjustment.shadows, adjustment.blacks)
+        if adjustment.contrast:
+            adjusted = _contrast(adjusted, adjustment.contrast)
+        if adjustment.dehaze:
+            adjusted = _dehaze(adjusted, adjustment.dehaze)
+        # The fallback preview uses the same EV semantics. Native Lightroom
+        # masks remain authoritative when Lightroom is the delivery engine.
+        if adjustment.saturation:
+            gray = luma(adjusted)[..., None]
+            adjusted = gray + (adjusted - gray) * (1.0 + adjustment.saturation)
+        out = out * (1.0 - mask[..., None]) + adjusted * mask[..., None]
+        if adjustment.clarity:
+            out = _masked_highpass(out, mask, adjustment.clarity, radius=9)
+        if adjustment.texture:
+            out = _masked_highpass(out, mask, adjustment.texture, radius=2)
     return np.clip(out, 0.0, 1.0)
 
 

@@ -90,6 +90,16 @@ def apply_geometry(linear: np.ndarray, geom: GeometryHint) -> np.ndarray:
     im = Image.fromarray(u8, mode="RGB")
     if abs(geom.rotate_deg) > 0.05:
         im = im.rotate(geom.rotate_deg, resample=Image.Resampling.BICUBIC, expand=False, fillcolor=(0, 0, 0))
+        # Cover the empty corners a rotate introduces when expand=False.
+        trim = min(0.10, abs(float(np.sin(np.radians(geom.rotate_deg)))) + 0.012)
+        geom = geom.model_copy(
+            update={
+                "crop_left": max(geom.crop_left, trim),
+                "crop_top": max(geom.crop_top, trim),
+                "crop_right": min(geom.crop_right, 1.0 - trim),
+                "crop_bottom": min(geom.crop_bottom, 1.0 - trim),
+            }
+        )
     w, h = im.size
     l = int(round(float(np.clip(geom.crop_left, 0.0, 1.0)) * w))
     t = int(round(float(np.clip(geom.crop_top, 0.0, 1.0)) * h))

@@ -7,6 +7,7 @@ from superphoto.layers import build_layers
 from superphoto.local import apply_local
 from superphoto.models import LocalEdit, Recipe
 from superphoto.render import apply_recipe
+from superphoto.semantic import SemanticMasks
 
 
 def test_subject_mask_prefers_center_blob() -> None:
@@ -16,6 +17,45 @@ def test_subject_mask_prefers_center_blob() -> None:
     inner = float(np.mean(layers.subject[32:48, 32:48]))
     outer = float(np.mean(layers.subject[:10, :10]))
     assert inner > outer + 0.15
+
+
+def test_semantic_subject_overrides_center_bias() -> None:
+    rgb = np.full((80, 80, 3), 0.2, dtype=np.float32)
+    zeros = np.zeros((80, 80), dtype=np.float32)
+    subject = zeros.copy()
+    subject[28:52, 4:24] = 1.0
+    semantic = SemanticMasks(
+        subject=subject,
+        sky=zeros,
+        foliage=zeros,
+        water=zeros,
+        skin=zeros,
+        confidence=0.9,
+        model="test",
+    )
+    layers = build_layers(rgb, semantic=semantic)
+    assert float(np.mean(layers.subject[32:48, 8:20])) > 0.7
+    assert float(np.mean(layers.subject[32:48, 32:48])) < 0.35
+
+
+def test_semantic_sky_rejects_blue_object_outside_sky() -> None:
+    rgb = np.full((80, 80, 3), 0.2, dtype=np.float32)
+    rgb[52:72, 20:60] = (0.15, 0.45, 0.8)
+    zeros = np.zeros((80, 80), dtype=np.float32)
+    sky = zeros.copy()
+    sky[:20] = 1.0
+    semantic = SemanticMasks(
+        subject=zeros,
+        sky=sky,
+        foliage=zeros,
+        water=zeros,
+        skin=zeros,
+        confidence=0.9,
+        model="test",
+    )
+    layers = build_layers(rgb, semantic=semantic)
+    assert float(np.mean(layers.sky[:12])) > 0.7
+    assert float(np.mean(layers.sky[58:68, 28:52])) < 0.3
 
 
 def test_color_clean_reduces_background_saturation() -> None:

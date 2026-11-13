@@ -7,13 +7,13 @@ We never apply that exposure to an already-developed JPEG.
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 
 import numpy as np
 
-from .color import hsl_to_rgb
-from .models import Grade, HueShift, Recipe, ToneCurve
+from .models import ColorGradingControls, HueShift, Recipe, ToneCurve
 
 _HSL_HUES = ("red", "orange", "yellow", "green", "aqua", "blue", "purple", "magenta")
 
@@ -50,7 +50,7 @@ def parse_xmp(path: Path, *, apply_exposure: bool = False) -> Recipe:
         if abs(hue) + abs(sat) + abs(lum) > 1e-4:
             hsl[name] = HueShift(hue=hue, sat=sat, lum=lum)
 
-    grade = _split_and_color_grade(n)
+    color_grading = _native_color_grade(n)
     curve = ToneCurve(
         rgb=_curve_points(text, "ToneCurvePV2012"),
         r=_curve_points(text, "ToneCurvePV2012Red"),
@@ -75,7 +75,7 @@ def parse_xmp(path: Path, *, apply_exposure: bool = False) -> Recipe:
         vignette=float(np.clip(-n.get("PostCropVignetteAmount", 0.0) / 100.0 * _K["vignette"], -0.4, 0.4)),
         grain=float(np.clip(n.get("GrainAmount", 0.0) / 100.0 * _K["grain"], 0.0, 0.35)),
         hsl=hsl,
-        grade=grade,
+        color_grading=color_grading,
         curve=curve,
     )
 
@@ -88,7 +88,9 @@ def _crs(text: str) -> dict[str, float]:
     out: dict[str, float] = {}
     for key, raw in re.findall(r'crs:([A-Za-z0-9]+)="([^"]+)"', text):
         try:
-            out[key] = float(raw.replace("+", "").strip())
+            value = float(raw.replace("+", "").strip())
+            if math.isfinite(value):
+                out[key] = value
         except ValueError:
             continue
     return out
@@ -112,38 +114,31 @@ def _curve_points(text: str, name: str) -> list[tuple[float, float]]:
     return pts
 
 
-def _split_and_color_grade(n: dict[str, float]) -> Grade:
-    sh = _hue_sat_offset(n.get("SplitToningShadowHue", 0.0), n.get("SplitToningShadowSaturation", 0.0), 0.20)
-    hh = _hue_sat_offset(n.get("SplitToningHighlightHue", 0.0), n.get("SplitToningHighlightSaturation", 0.0), 0.22)
-    mh = _hue_sat_offset(n.get("ColorGradeMidtoneHue", 0.0), n.get("ColorGradeMidtoneSat", 0.0), 0.18)
-    cg_sh = _hue_sat_offset(n.get("ColorGradeShadowHue", 0.0), n.get("ColorGradeShadowSat", 0.0), 0.18)
-    cg_hh = _hue_sat_offset(n.get("ColorGradeHighlightHue", 0.0), n.get("ColorGradeHighlightSat", 0.0), 0.18)
-    blend = n.get("ColorGradeBlending", 50.0) / 50.0
-    slum = n.get("ColorGradeShadowLum", 0.0) / 100.0 * 0.08
-    mlum = n.get("ColorGradeMidtoneLum", 0.0) / 100.0 * 0.08
-    hlum = n.get("ColorGradeHighlightLum", 0.0) / 100.0 * 0.10
-    shadows = _add3(sh, _add3(cg_sh, (slum, slum, slum)))
-    midtones = _add3(mh, (mlum, mlum, mlum))
-    highlights = _add3(hh, _add3(cg_hh, (hlum, hlum, hlum)))
-    if blend != 1.0:
-        midtones = tuple(c * blend for c in midtones)  # type: ignore[assignment]
-        shadows = tuple(c * max(blend, 0.7) for c in shadows)  # type: ignore[assignment]
-        highlights = tuple(c * max(blend, 0.7) for c in highlights)  # type: ignore[assignment]
-    return Grade(shadows=shadows, midtones=midtones, highlights=highlights)
+def _native_color_grade(n: dict[str, float]) -> ColorGradingControls:
+    """Preserve supported Camera Raw wheels in their native units, once.
 
-
-def _hue_sat_offset(hue_deg: float, sat: float, scale: float) -> tuple[float, float, float]:
-    if abs(sat) < 0.5:
-        return (0.0, 0.0, 0.0)
-    h = np.array([(hue_deg % 360.0) / 360.0], dtype=np.float32)
-    s = np.array([1.0], dtype=np.float32)
-    l = np.array([0.5], dtype=np.float32)
-    rgb = hsl_to_rgb(h, s, l)[0]
-    k = float(np.clip(sat / 100.0, -1.0, 1.0)) * scale
-    return (float((rgb[0] - 0.5) * 2.0 * k), float((rgb[1] - 0.5) * 2.0 * k), float((rgb[2] - 0.5) * 2.0 * k))
-
-
-def _add3(
-    a: tuple[float, float, float], b: tuple[float, float, float]
-) -> tuple[float, float, float]:
-    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+    Lightroom still writes shadow/highlight hue and saturation under the
+    SplitToning names. Alternate ColorGrade names describe the same controls,
+    not an extra layer. Canonical names, including explicit zero, take priority.
+    Missing controls stay unset so a partial preset does not reset other wheels.
+    The global wheel is not represented by Recipe and is not approximated here.
+    """
+    values: dict[str, float] = {}
+    for field, keys, low, high in (
+        ("shadow_hue", ("SplitToningShadowHue", "ColorGradeShadowHue"), 0, 360),
+        ("shadow_sat", ("SplitToningShadowSaturation", "ColorGradeShadowSat"), 0, 100),
+        ("shadow_lum", ("ColorGradeShadowLum",), -100, 100),
+        ("midtone_hue", ("ColorGradeMidtoneHue",), 0, 360),
+        ("midtone_sat", ("ColorGradeMidtoneSat",), 0, 100),
+        ("midtone_lum", ("ColorGradeMidtoneLum",), -100, 100),
+        ("highlight_hue", ("SplitToningHighlightHue", "ColorGradeHighlightHue"), 0, 360),
+        ("highlight_sat", ("SplitToningHighlightSaturation", "ColorGradeHighlightSat"), 0, 100),
+        ("highlight_lum", ("ColorGradeHighlightLum",), -100, 100),
+        ("blending", ("ColorGradeBlending",), 0, 100),
+        ("balance", ("SplitToningBalance", "ColorGradeBalance"), -100, 100),
+    ):
+        for key in keys:
+            if key in n:
+                values[field] = max(low, min(high, n[key]))
+                break
+    return ColorGradingControls(**values)

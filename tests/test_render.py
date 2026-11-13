@@ -51,6 +51,22 @@ def test_contrast_is_visibly_stronger() -> None:
     assert spread_out > spread_in * 1.12
 
 
+def test_saturation_follows_light() -> None:
+    rgb = np.zeros((32, 32, 3), dtype=np.float32)
+    rgb[:16] = (0.07, 0.055, 0.045)
+    rgb[16:] = (0.62, 0.46, 0.34)
+    lin = srgb_to_linear(rgb)
+    out = linear_to_srgb(apply_recipe(lin, Recipe(saturation=0.45)))
+    src = linear_to_srgb(lin)
+
+    def sat(im: np.ndarray) -> float:
+        return float(np.mean(np.max(im, axis=-1) - np.min(im, axis=-1)))
+
+    dark_gain = sat(out[:16]) - sat(src[:16])
+    bright_gain = sat(out[16:]) - sat(src[16:])
+    assert bright_gain > dark_gain * 1.25
+
+
 def test_cinematic_grade_shifts_shadows_cool() -> None:
     from superphoto.recipes import LOOKS
 

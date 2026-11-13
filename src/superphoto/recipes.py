@@ -90,10 +90,10 @@ LOOKS: dict[str, Look] = {
         id="faithful",
         title="忠实校正",
         title_en="Faithful",
-        description="Heaton：收高光、加中灰对比，现场味道还在。",
+        description="只做技术校正，不加味道。已经完成的 JPEG 应接近原片。",
         genre_tags=["general", "documentary", "portrait", "landscape"],
-        moves=["heaton_tone"],
-        recipe=MOVES["heaton_tone"],
+        moves=["protect_highlights"],
+        recipe=Recipe(),
     ),
     "filmic_portrait_warm": Look(
         id="filmic_portrait_warm",
@@ -151,15 +151,28 @@ DEFAULT_LOOK_IDS = ("faithful", "filmic_portrait_warm", "landscape_filmic")
 
 LOOKS = {**LOOKS, **load_xmp_looks()}
 
+# The celebrity-imitation workflow is kept in a separate module so its
+# Lightroom-oriented recipes and routing rules can evolve independently.
+from .celebrity_styles import CELEBRITY_LOOKS  # noqa: E402
+
+LOOKS = {**LOOKS, **CELEBRITY_LOOKS}
+
 
 def get_look(look_id: str) -> Look:
-    if look_id not in LOOKS:
+    if look_id in LOOKS:
+        return LOOKS[look_id]
+    from .masters import look_for
+
+    look = look_for(look_id)
+    if look is None:
         raise KeyError(look_id)
-    return LOOKS[look_id]
+    return look
 
 
 def allowed_look_ids() -> list[str]:
-    return list(LOOKS.keys())
+    from .masters import master_look_ids
+
+    return list(LOOKS.keys()) + master_look_ids()
 
 
 def xmp_look_ids() -> set[str]:

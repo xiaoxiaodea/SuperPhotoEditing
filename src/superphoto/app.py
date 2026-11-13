@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import threading
 import uuid
@@ -21,15 +22,24 @@ from .db import (
     insert_feedback,
     insert_job,
     look_stats,
+    get_ratings,
+    set_rating,
+    get_refinement,
+    get_refinements,
+    insert_refinement,
 )
 from .darktable_export import darktable_cli_path
 from .ingest import ALLOWED_EXTS, source_kind
-from .models import FeedbackIn
+from .lightroom import LightroomError, connect_lightroom, install_lightroom_plugin, lightroom_status
+from .models import FeedbackIn, RatingIn, RefinementIn
 from .ollama import probe
 from .pipeline import run_job
 from .preference import describe_taste
 from .recipes import LOOKS
+from .semantic import semantic_status
 from .store import job_dir
+from .scene_preferences import job_profile, preference_samples, variant_method
+from .refinement import refinement_base, run_refinement
 
 def _find_web_dir() -> Path:
     here = Path(__file__).resolve().parent
@@ -52,8 +62,7 @@ _state: dict[str, Any] = {}
 
 def reset_runtime() -> None:
     with _lock:
-        conn = _state.get("conn")
-        if conn is not None:
+        for conn in _state.get("connections", {}).values():
             conn.close()
         _state.clear()
 
@@ -66,9 +75,21 @@ def _boot() -> tuple[Settings, sqlite3.Connection]:
             settings.jobs_dir.mkdir(parents=True, exist_ok=True)
             conn = connect(settings.db_path)
             init_db(conn)
+            conn.execute("""UPDATE refinements SET status='error', step='error',
+                error='应用在微调完成前关闭了。调整前版本已保留，可以重新提交意见。'
+                WHERE status IN ('queued', 'running')""")
+            conn.commit()
             _state["settings"] = settings
-            _state["conn"] = conn
-        return _state["settings"], _state["conn"]
+            _state["connections"] = {threading.get_ident(): conn}
+        # FastAPI status, feedback and processing workers run concurrently.
+        # check_same_thread=False permits access, but sharing one connection
+        # also shares transaction state and cached statements. Keep those
+        # private to each worker so a poll cannot corrupt another result row.
+        connections = _state["connections"]
+        worker = threading.get_ident()
+        if worker not in connections:
+            connections[worker] = connect(_state["settings"].db_path)
+        return _state["settings"], connections[worker]
 
 
 @asynccontextmanager
@@ -106,6 +127,8 @@ def health() -> dict[str, Any]:
     else:
         critic = "local"
         critic_model = None
+    semantic = semantic_status(settings)
+    lr_status = lightroom_status(settings.lightroom_enabled, settings.lightroom_mcp_server)
     return {
         "ok": True,
         "critic": critic,
@@ -115,8 +138,31 @@ def health() -> dict[str, Any]:
         "model": settings.xai_model if settings.xai_api_key else None,
         "rawpy": rawpy_ok,
         "darktable_cli": darktable_cli_path(),
+        "semantic": semantic,
+        "lightroom": lr_status,
         "taste": describe_taste(_c()),
     }
+
+
+@app.post("/api/lightroom/install-plugin")
+def install_lr_plugin() -> dict[str, Any]:
+    settings = _s()
+    try:
+        return install_lightroom_plugin(settings.lightroom_mcp_server)
+    except LightroomError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/api/lightroom/connect")
+def connect_lr() -> dict[str, Any]:
+    settings = _s()
+    if not settings.lightroom_enabled:
+        raise HTTPException(409, "当前未启用 Lightroom 后期")
+    try:
+        _client, status = connect_lightroom(settings.lightroom_mcp_server)
+        return status
+    except LightroomError as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 @app.get("/api/looks")
@@ -142,7 +188,10 @@ def preferences() -> dict[str, Any]:
     for row in stats["looks"]:
         look = LOOKS.get(row["look_id"])
         titled.append({**row, "title": look.title if look else row["look_id"]})
-    return {"total_picks": stats["total_picks"], "looks": titled, "summary": describe_taste(_c())}
+    samples = preference_samples(_c())
+    return {"total_picks": stats["total_picks"], "looks": titled, "summary": describe_taste(_c()),
+            "ratings": {"like": sum(s["verdict"] > 0 for s in samples),
+                        "dislike": sum(s["verdict"] < 0 for s in samples)}}
 
 
 @app.post("/api/jobs")
@@ -172,6 +221,27 @@ async def create_job(
     return {"id": job_id, "kind": source_kind(original)}
 
 
+@app.post("/api/jobs/{job_id}/retry")
+def retry_job(job_id: str, background: BackgroundTasks) -> dict[str, str]:
+    settings, conn = _boot()
+    saved = get_job(conn, job_id)
+    if not saved:
+        raise HTTPException(404, "找不到这次处理记录")
+    if saved["status"] != "error":
+        raise HTTPException(409, "只能重试处理失败的照片")
+    name = saved["original_name"] or "photo.jpg"
+    filename = Path(saved["original_file"] or f"original{Path(name).suffix.lower()}").name
+    source = settings.jobs_dir / job_id / filename
+    if not source.is_file():
+        raise HTTPException(410, "原片已不在本机，请重新选择照片")
+    new_id = str(uuid.uuid4())
+    original = job_dir(settings, new_id) / filename
+    shutil.copy2(source, original)
+    insert_job(conn, new_id, name)
+    background.add_task(_safe_run, new_id, original)
+    return {"id": new_id, "kind": source_kind(original)}
+
+
 def _safe_run(job_id: str, original: Path) -> None:
     settings, conn = _boot()
     try:
@@ -179,6 +249,12 @@ def _safe_run(job_id: str, original: Path) -> None:
     except Exception:
         # run_job already records the error
         pass
+
+
+@app.get("/api/jobs/latest")
+def latest_job() -> dict[str, Any]:
+    row = _c().execute("SELECT id FROM jobs ORDER BY created_at DESC, rowid DESC LIMIT 1").fetchone()
+    return {"id": row["id"] if row else None}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -196,13 +272,19 @@ def job_status(job_id: str) -> dict[str, Any]:
                 "look_id": row["look_id"],
                 "title": row["title"],
                 "why": row["why"],
-                "moves": LOOKS[row["look_id"]].moves if row["look_id"] in LOOKS else [],
+                "moves": (recipe.get("style_workflow", {}).get("adaptation_notes", [])
+                          if recipe.get("style_workflow", {}).get("mode") == "art-directed"
+                          else LOOKS[row["look_id"]].moves if row["look_id"] in LOOKS else []),
                 "recipe": recipe,
                 "url": f"/media/{job_id}/{row['filename']}",
             }
         )
     technical = json.loads(job["technical_json"]) if job.get("technical_json") else None
     critique = json.loads(job["critique_json"]) if job.get("critique_json") else None
+    decision_path = job_dir(_s(), job_id) / "style-decision.json"
+    style_decision = json.loads(decision_path.read_text(encoding="utf-8")) if decision_path.is_file() else None
+    delivery_path = job_dir(_s(), job_id) / "lightroom-qa.json"
+    delivery = json.loads(delivery_path.read_text(encoding="utf-8")).get("delivery") if delivery_path.is_file() else None
     return {
         "id": job["id"],
         "status": job["status"],
@@ -212,8 +294,103 @@ def job_status(job_id: str) -> dict[str, Any]:
         "source_preview": f"/media/{job_id}/source_preview.jpg" if job["status"] in {"ready", "running"} else None,
         "technical": technical,
         "critique": critique,
+        "style_decision": style_decision,
         "variants": variants,
+        "delivery": delivery,
+        "ratings": get_ratings(conn, job_id),
+        "refinements": [_public_refinement(r) for r in get_refinements(conn, job_id)],
     }
+
+
+def _ready_variant(conn, job_id: str, slot: str) -> tuple[dict, dict]:
+    job = get_job(conn, job_id)
+    if not job:
+        raise HTTPException(404, "找不到这次处理记录")
+    if job["status"] != "ready":
+        raise HTTPException(409, "请等成片处理完成后再操作")
+    variant = next((v for v in get_variants(conn, job_id) if v["slot"] == slot), None)
+    if not variant:
+        raise HTTPException(404, "找不到这张成片")
+    return job, variant
+
+
+@app.put("/api/jobs/{job_id}/ratings/{slot}")
+def rate_variant(job_id: str, slot: str, body: RatingIn) -> dict:
+    conn = _c()
+    job, variant = _ready_variant(conn, job_id, slot)
+    method, scene = variant_method(variant), job_profile(job)
+    with _lock:
+        set_rating(conn, job_id, slot, {"like": 1, "dislike": -1, None: 0}[body.verdict], method, scene)
+    return {"ok": True, "ratings": get_ratings(conn, job_id), "summary": describe_taste(conn),
+            "learnable": bool(method and scene)}
+
+
+def _public_refinement(record: dict) -> dict:
+    result = {key: record[key] for key in ("id", "job_id", "slot", "parent_id", "prompt", "status", "step",
+                                         "summary", "created_at", "updated_at")}
+    result["error"] = _public_error(record.get("error"))
+    result["url"] = (f"/api/jobs/{record['job_id']}/refinements/{record['id']}/image"
+                     if record["status"] == "ready" else None)
+    return result
+
+
+@app.post("/api/jobs/{job_id}/refinements", status_code=202)
+def create_refinement(job_id: str, body: RefinementIn, background: BackgroundTasks) -> dict:
+    settings, conn = _boot()
+    job, _ = _ready_variant(conn, job_id, body.slot)
+    refinement_id = str(body.request_id)
+    parent_id = str(body.parent_id) if body.parent_id else None
+    with _lock:
+        existing = get_refinement(conn, refinement_id)
+        if existing:
+            if (existing["job_id"], existing["slot"], existing["parent_id"], existing["prompt"]) != (
+                    job_id, body.slot, parent_id, body.prompt):
+                raise HTTPException(409, "这条微调请求已用于其他内容，请重新提交")
+            return _public_refinement(existing)
+        if not settings.lightroom_enabled:
+            raise HTTPException(409, "需要启用 Lightroom 才能进行二次调整")
+        try:
+            refinement_base(settings, conn, job_id, body.slot, parent_id)
+        except (ValueError, KeyError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        original = settings.jobs_dir / job_id / Path(job["original_file"] or "original.jpg").name
+        if not original.is_file():
+            raise HTTPException(410, "原片已不在本机，无法继续微调")
+        try:
+            insert_refinement(conn, refinement_id, job_id, body.slot, parent_id, body.prompt)
+        except sqlite3.IntegrityError as exc:
+            conn.rollback()
+            raise HTTPException(409, "这张图已有微调正在处理，请等它完成后再提交") from exc
+    background.add_task(_safe_refine, refinement_id)
+    return _public_refinement(get_refinement(conn, refinement_id))
+
+
+def _safe_refine(refinement_id: str) -> None:
+    settings = _s()
+    conn = connect(settings.db_path)
+    try:
+        run_refinement(settings, conn, refinement_id)
+    finally:
+        conn.close()
+
+
+@app.get("/api/jobs/{job_id}/refinements/{refinement_id}")
+def refinement_status(job_id: str, refinement_id: str) -> dict:
+    record = get_refinement(_c(), refinement_id)
+    if not record or record["job_id"] != job_id:
+        raise HTTPException(404, "找不到这次微调")
+    return _public_refinement(record)
+
+
+@app.get("/api/jobs/{job_id}/refinements/{refinement_id}/image")
+def refinement_image(job_id: str, refinement_id: str) -> FileResponse:
+    record = get_refinement(_c(), refinement_id)
+    if not record or record["job_id"] != job_id or record["status"] != "ready":
+        raise HTTPException(404, "找不到微调成片")
+    image = _s().jobs_dir / job_id / "refinements" / refinement_id / "result.jpg"
+    if not image.is_file():
+        raise HTTPException(404, "微调成片已不在本机")
+    return FileResponse(image, media_type="image/jpeg", filename=f"SuperPhoto-{record['slot']}-微调-{refinement_id[:8]}.jpg")
 
 
 @app.post("/api/jobs/{job_id}/feedback")
@@ -226,6 +403,28 @@ def submit_feedback(job_id: str, body: FeedbackIn) -> dict[str, Any]:
     chosen = variants.get(body.chosen_slot)
     if not chosen:
         raise HTTPException(400, "unknown slot")
+    reaction_scores = {
+        "keep": (5, 5, 5),
+        "too_dark": (2, 3, 2),
+        "too_bright": (2, 3, 2),
+        "too_strong": (3, 2, 1),
+        "too_flat": (3, 2, 5),
+        "color_wrong": (2, 2, 3),
+        "subject_weak": (3, 2, 4),
+    }
+    inferred = reaction_scores[body.reaction]
+    labels = {
+        "keep": "满意",
+        "too_dark": "太暗",
+        "too_bright": "太亮",
+        "too_strong": "处理太重",
+        "too_flat": "效果太淡",
+        "color_wrong": "颜色不自然",
+        "subject_weak": "主体不突出",
+    }
+    note = body.notes.strip()
+    reaction_note = f"简单反馈：{labels[body.reaction]}"
+    note = f"{reaction_note}；{note}" if note else reaction_note
     insert_feedback(
         conn,
         {
@@ -233,12 +432,17 @@ def submit_feedback(job_id: str, body: FeedbackIn) -> dict[str, Any]:
             "job_id": job_id,
             "chosen_slot": body.chosen_slot,
             "look_id": chosen["look_id"],
-            "technical_score": body.technical_score,
-            "style_score": body.style_score,
-            "restraint_score": body.restraint_score,
-            "notes": body.notes,
+            "technical_score": body.technical_score or inferred[0],
+            "style_score": body.style_score or inferred[1],
+            "restraint_score": body.restraint_score or inferred[2],
+            "notes": note,
         },
     )
+    method, scene = variant_method(chosen), job_profile(job)
+    if method and scene:
+        verdict = 1 if (body.style_score or inferred[1]) >= 4 and (body.technical_score or inferred[0]) >= 3 else -1
+        with _lock:
+            set_rating(conn, job_id, body.chosen_slot, verdict, method, scene)
     return {"ok": True, "preferences": look_stats(conn), "summary": describe_taste(conn)}
 
 
@@ -275,8 +479,20 @@ def _public_error(error: str | None) -> str | None:
     return first
 
 
+class UIStaticFiles(StaticFiles):
+    """The installed UI is replaced in place; never reuse a previous shell."""
+
+    def is_not_modified(self, response_headers, request_headers) -> bool:
+        return False
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+
 if WEB_DIR.is_dir():
-    app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
+    app.mount("/", UIStaticFiles(directory=str(WEB_DIR), html=True), name="web")
 
 
 def create_app() -> FastAPI:

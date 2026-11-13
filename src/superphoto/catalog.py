@@ -120,7 +120,7 @@ XMP_LOOKS: list[dict] = [
         "title_en": "Natsume",
         "description": "洋红抽干、浅灰抬黑、奶油高光，日式清淡。",
         "file": "natsume.xmp",
-        "genre_tags": ["portrait", "landscape", "general"],
+        "genre_tags": ["portrait", "general"],
         "moves": ["kill-magenta", "matte-curve"],
     },
     {

@@ -6,14 +6,26 @@ import numpy as np
 
 from .composition import clamp_geometry, suggest_geometry
 from .db import look_stats
-from .models import CorrectionHint, Critique, HueShift, LocalEdit, Recipe, TechnicalReport, VariantPlan
+from .models import (
+    CorrectionHint,
+    Critique,
+    EditIntent,
+    GeometryHint,
+    HueShift,
+    LocalEdit,
+    Recipe,
+    TechnicalReport,
+    VariantPlan,
+)
+from .look_routes import route_similarity
 from .recipes import LOOKS, get_look, xmp_look_ids
+from .workflow import apply_ethics, ethics_regime_for, guard_hues
 
 
 def preferred_look_ids(conn: sqlite3.Connection) -> list[str]:
     stats = look_stats(conn)
     ranked = sorted(stats["looks"], key=lambda r: (r["wins"], r["style"] or 0), reverse=True)
-    return [r["look_id"] for r in ranked]
+    return [r["look_id"] for r in ranked if r["wins"] > 0]
 
 
 def build_plans(
@@ -22,77 +34,176 @@ def build_plans(
     technical: TechnicalReport,
 ) -> list[VariantPlan]:
     correction = sanitize_correction(critique.correction, technical).as_recipe()
+    correction = correction.model_copy(update={"masks": [m.model_copy(deep=True) for m in critique.intent.masks]})
+    ethics = ethics_regime_for(critique.genre)
     slots = ("A", "B", "C")
     plans: list[VariantPlan] = []
     for slot, look_id in zip(slots, look_ids, strict=False):
         look = get_look(look_id)
+        direction = next((d for d in critique.directions if d.slot == slot), None)
+        if direction is not None:
+            from .directions import bound_direction
+            if direction.look_id and direction.look_id != look_id:
+                raise ValueError(f"{slot}: direction preset {direction.look_id} differs from selected {look_id}")
+            direction = bound_direction(direction, critique, technical)
+            recipe = correction.merged(direction.recipe).clamped()
+            # RAW recovery is the common correction beneath the three looks.
+            # Do not let a weaker sky style erase the diagnosis's paired light
+            # controls. Keep any scene-specific local color choices.
+            if technical.source_kind == "raw":
+                recovery = next((m for m in correction.masks if m.target == "sky"
+                    and m.exposure_ev <= -.5 and (m.highlights < -.1 or m.contrast > .1)), None)
+                if recovery is not None:
+                    for mask in recipe.masks:
+                        if mask.target == "sky" and mask.exposure_ev > recovery.exposure_ev:
+                            for key in ("exposure_ev", "contrast", "whites", "blacks", "highlights", "shadows"):
+                                setattr(mask, key, getattr(recovery, key))
+                            mask.reason = recovery.reason
+            recipe = honor_locked_controls(apply_ethics(guard_hues(recipe, technical, ethics), ethics), critique.intent)
+            recipe.masks = [m.for_source(technical.source_kind) for m in recipe.masks]
+            intent = critique.intent.model_copy(update={"goal": direction.goal, "masks": recipe.masks})
+            geom = GeometryHint()
+            if slot != "A" and critique.geometry.apply:
+                geom = critique.geometry.model_copy(deep=True)
+                if technical.horizon_confidence < .32:
+                    geom.rotate_deg = 0.0
+                geom = clamp_geometry(geom)
+            plans.append(VariantPlan(slot=slot, look_id=look_id, title=direction.title, why=direction.goal,
+                                     method_id=direction.method_id,
+                                     recipe=recipe, moves=direction.moves, lut_mix=direction.preset_amount, primary=correction,
+                                     ethics=ethics, genre=critique.genre, intent=intent, geometry=geom))
+            continue
         match = look_match(look.id, technical, critique.genre)
         amount = lut_amount(look, technical, slot, match, critique.lut_mix)
-        look_recipe = look.recipe if amount >= 0.995 else _scale_recipe(look.recipe, amount)
+        if look.id == "celebrity_rescue":
+            amount = 0.25
+        elif critique.intent.natural_color:
+            amount = min(amount, 0.40 if slot == "B" else 0.55)
+        if look.source == "master":
+            from .masters import recipe_for_photo
+
+            base_recipe = recipe_for_photo(look.id, technical)
+        else:
+            base_recipe = look.recipe
+        look_recipe = _scale_recipe(base_recipe, amount)
         look_recipe = _fit_lut_to_scene(look_recipe, look.id, technical)
+        look_recipe = protect_look(look_recipe, critique.intent)
         recipe = _adapt_to_scene(correction.merged(look_recipe), technical, look_id)
-        recipe = recipe.model_copy(update={"local": recipe.local.merged(local_edit_for(slot, technical))}).clamped()
+        recipe = recipe.model_copy(
+            update={
+                "local": recipe.local.merged(
+                    local_edit_for(
+                        slot,
+                        technical,
+                        genre=critique.genre,
+                        has_clutter=bool(critique.clutter),
+                    )
+                )
+            }
+        ).clamped()
+        recipe = honor_locked_controls(apply_ethics(guard_hues(recipe, technical, ethics), ethics), critique.intent)
+        recipe.masks = [m.for_source(technical.source_kind) for m in recipe.masks]
         geom = suggest_geometry(technical, critique.genre, slot)
-        if critique.geometry.apply:
-            merged = critique.geometry
-            if slot == "A":
-                merged = merged.model_copy(update={"crop_left": 0.0, "crop_top": 0.0, "crop_right": 1.0, "crop_bottom": 1.0})
-            geom = clamp_geometry(merged) if geom.is_noop() else geom
-        geom = clamp_geometry(geom)
-        why = _why(slot, look, critique, amount, geom)
+        if slot == "A":
+            # Reference slot keeps the original frame. VLM tilt guesses left black corners.
+            geom = GeometryHint()
+        else:
+            if critique.geometry.apply:
+                merged = critique.geometry
+                if technical.horizon_confidence < 0.32:
+                    merged = merged.model_copy(update={"rotate_deg": 0.0})
+                geom = clamp_geometry(merged) if geom.is_noop() else geom
+            geom = clamp_geometry(geom)
+        master_meta = None
+        if look.source == "master":
+            from .masters import match_report
+
+            master_meta = match_report(technical, look.id)
+        why = _why(slot, look, critique, amount, geom, match)
         plans.append(
             VariantPlan(
                 slot=slot,  # type: ignore[arg-type]
                 look_id=look.id,
-                title=look.title,
-                why=why,
+                title={"A": "自然精修", "B": "光影层次", "C": "克制氛围"}[slot] if critique.intent.natural_color else look.title,
+                why=(critique.intent.goal + "。" + "；".join(m.reason for m in recipe.masks if m.reason)) if critique.intent.masks else why,
                 recipe=recipe,
                 moves=look.moves,
                 lut_mix=amount,
                 geometry=geom,
+                primary=correction,
+                ethics=ethics,
+                genre=critique.genre,
+                intent=critique.intent,
+                master=master_meta,
             )
         )
     return plans
 
 
+def honor_locked_controls(recipe: Recipe, intent: EditIntent) -> Recipe:
+    updates = {key: 0.0 for key in intent.locked_controls if key != "hue"}
+    if "hue" in intent.locked_controls:
+        updates["hsl"] = {k: v.model_copy(update={"hue": 0.0}) for k, v in recipe.hsl.items()}
+    return recipe.model_copy(update=updates)
+
+
+def reduce_style_strength(recipe: Recipe, primary: Recipe, amount: float) -> Recipe:
+    """Back off this preset without reducing confirmed exposure/local recovery."""
+    from .workflow import _delta_recipe
+    residual = _delta_recipe(recipe, primary)
+    residual.masks = []
+    result = primary.merged(_scale_recipe(residual, amount))
+    result.masks = [m.model_copy(deep=True) for m in recipe.masks]
+    for key in ("detail", "optics", "crop"):
+        setattr(result, key, getattr(recipe, key).model_copy(deep=True))
+    return result.clamped()
+
+
+def protect_look(recipe: Recipe, intent: EditIntent) -> Recipe:
+    """Preserve the same photographic intent through every refinement."""
+    if intent.natural_color:
+        recipe = recipe.model_copy(update={
+            "temperature": 0.0, "tint": 0.0, "grade": Recipe().grade,
+            "curve": recipe.curve.model_copy(update={"r": [], "g": [], "b": []}),
+            "hsl": {k: v.model_copy(update={"hue": float(np.clip(v.hue, -4, 4)),
+                                            "sat": float(np.clip(v.sat, -0.15, 0.05))})
+                    for k, v in recipe.hsl.items()},
+        })
+    if intent.preserve_black_depth:
+        recipe = recipe.model_copy(update={
+            "blacks": min(recipe.blacks, 0.08), "shadows": min(recipe.shadows, 0.12),
+            "curve": recipe.curve.model_copy(update={
+                "rgb": [(x, min(y, x + 0.02) if x < 0.10 else y) for x, y in recipe.curve.rgb]
+            }),
+        })
+    if intent.preserve_atmosphere:
+        recipe = recipe.model_copy(update={"dehaze": min(recipe.dehaze, 0.04)})
+    return honor_locked_controls(recipe, intent)
+
+
 def look_match(look_id: str, technical: TechnicalReport, genre: str) -> float:
-    """How well a preset belongs on this picture. 0 = skip, 1 = strong fit."""
+    """How well a preset belongs on this picture. 0 = skip, 1 = strong fit.
+
+    Hasselblad Masters are matched by scene (light, subject, environment).
+    XMP looks use 练习图 centroids. Genre tags are a small bonus.
+    """
+    if look_id.startswith("hb:"):
+        from .masters import master_similarity
+
+        return master_similarity(look_id, technical)
     look = LOOKS.get(look_id)
     if look is None or look_id == "faithful":
         return 0.0
-    score = 0.28
+    sim = route_similarity(look_id, technical)
+    if sim is None:
+        score = 0.28
+        score += 0.22 if genre in look.genre_tags else -0.16
+        return float(np.clip(score, 0.0, 1.0))
+    score = 0.10 + 0.80 * sim
     if genre in look.genre_tags:
-        score += 0.22
-    lid = look_id
-    if lid == "dune":
-        if technical.skin_fraction > 0.10:
-            score -= 0.40
-        if technical.green_fraction > 0.22 and technical.saturation_mean > 0.38:
-            score -= 0.28
-        if technical.top_third_blue > 0.16 or technical.aqua_fraction > 0.08:
-            score -= 0.18
-        if genre == "landscape" and technical.temperature_bias > 0.04:
-            score += 0.22
-    elif lid in {"kdrama_tears", "romance_gold", "filmic_portrait_warm"}:
-        score += 0.32 if technical.skin_fraction > 0.08 else -0.42
-    elif lid == "hanabi":
-        score += 0.40 if technical.top_third_blue > 0.08 and technical.mean_luma < 0.16 else -0.50
-    elif lid == "tokyo_ghoul":
-        score += 0.28 if technical.mean_luma < 0.12 else -0.35
-    elif lid in {"natsume", "five_cm"}:
-        if technical.skin_fraction > 0.08 or genre in {"landscape", "portrait", "general"}:
-            score += 0.18
-        if technical.magenta_fraction > 0.05:
-            score -= 0.12
-    elif lid in {"skam", "shameless", "wong_kar_wai", "jp_drama"}:
-        if genre in {"street", "urban", "indoor", "portrait"}:
-            score += 0.16
-        if technical.green_fraction > 0.28:
-            score -= 0.20
-    elif lid == "moody_lowkey":
-        score += 0.30 if technical.mean_luma < 0.14 else -0.15
-    elif lid == "landscape_filmic":
-        score += 0.20 if technical.green_fraction > 0.12 or technical.top_third_blue > 0.15 else -0.10
+        score += 0.06
+    else:
+        score -= 0.04
     return float(np.clip(score, 0.0, 1.0))
 
 
@@ -103,32 +214,54 @@ def lut_amount(
     match: float,
     critique_mix: float,
 ) -> float:
-    """Never 100% of an XMP pack on a developed JPEG."""
+    """Looks are mixes. A developed JPEG never gets a full second grade."""
     if look.id == "faithful":
         return 1.0
+    if look.id == "celebrity_rescue":
+        return 0.82 if technical.source_kind in {"jpeg", "png"} else 1.0
+    if look.source == "master":
+        amount = 0.40 + 0.48 * float(np.clip(match, 0.0, 1.0))
+        if technical.source_kind in {"jpeg", "png"}:
+            amount *= 0.94
+        if technical.saturation_mean > 0.48:
+            amount *= 0.90
+        return float(np.clip(amount, 0.34, 0.88))
+    developed = technical.source_kind in {"jpeg", "png"}
     if look.source != "xmp":
-        return float({"A": 1.0, "B": 1.12, "C": 1.28}.get(slot, 1.0))
+        amount = {"A": 0.45, "B": 0.88, "C": 1.0}.get(slot, 0.85)
+        if developed:
+            amount *= 0.94
+        if technical.saturation_mean > 0.52:
+            amount *= 0.92
+        return float(np.clip(amount, 0.55, 1.0))
     amount = 0.50 + 0.30 * float(np.clip(match, 0.0, 1.0))
-    if technical.source_kind in {"jpeg", "png"}:
-        amount *= 0.96
-    if technical.saturation_mean > 0.46:
+    if developed:
+        amount *= 0.92
+    if technical.saturation_mean > 0.50:
         amount *= 0.90
     if technical.dynamic_spread > 0.78:
-        amount *= 0.92
+        amount *= 0.94
     if slot == "B":
-        amount *= 0.92
+        amount *= 0.94
     amount *= float(np.clip(critique_mix, 0.40, 0.85)) / 0.55
-    return float(np.clip(amount, 0.42, 0.86))
+    return float(np.clip(amount, 0.38, 0.82))
 
 
 def ranked_look_ids(technical: TechnicalReport, genre: str) -> list[str]:
+    from .masters import ranked_master_ids
+
+    ordered: list[str] = []
+    for look_id in ranked_master_ids(technical):
+        if look_match(look_id, technical, genre) >= 0.20:
+            ordered.append(look_id)
     scored = []
     for look in LOOKS.values():
-        if look.id == "faithful":
+        if look.id == "faithful" or look.id in ordered:
             continue
         scored.append((look_match(look.id, technical, genre), look.id))
     scored.sort(reverse=True)
-    return [lid for s, lid in scored if s >= 0.20]
+    ordered.extend(lid for s, lid in scored if s >= 0.20)
+    return ordered
 
 
 def sanitize_correction(hint: CorrectionHint, technical: TechnicalReport) -> CorrectionHint:
@@ -148,7 +281,7 @@ def sanitize_correction(hint: CorrectionHint, technical: TechnicalReport) -> Cor
         data["whites"] = float(np.clip(data["whites"], -0.20, 0.12))
         data["blacks"] = float(np.clip(data["blacks"], -0.16, 0.10))
         data["contrast"] = float(np.clip(data["contrast"], -0.10, 0.10))
-        data["saturation"] = float(np.clip(data["saturation"], -0.10, 0.06))
+        data["saturation"] = float(np.clip(data["saturation"], -0.03, 0.03))
         data["vibrance"] = float(np.clip(data["vibrance"], -0.08, 0.08))
         data["clarity"] = float(np.clip(data["clarity"], -0.04, 0.10))
         data["dehaze"] = float(np.clip(data["dehaze"], 0.0, 0.08))
@@ -157,6 +290,8 @@ def sanitize_correction(hint: CorrectionHint, technical: TechnicalReport) -> Cor
     else:
         data["exposure_ev"] = float(np.clip(data["exposure_ev"], -0.8, 0.8))
         data["shadows"] = float(np.clip(data["shadows"], -0.15, 0.25))
+        if technical.highlight_p95 > .93:
+            data["whites"] = min(data["whites"], 0.0)
     return CorrectionHint.model_validate(data)
 
 
@@ -189,11 +324,62 @@ def _fit_lut_to_scene(recipe: Recipe, look_id: str, technical: TechnicalReport) 
     return recipe.model_copy(update={"hsl": hsl})
 
 
+def _soften_developed(data: dict, technical: TechnicalReport) -> dict:
+    """Keep JPEG looks visible, but stop short of a second HDR pass."""
+    if technical.source_kind not in {"jpeg", "png"}:
+        return data
+    data["contrast"] = min(float(data.get("contrast") or 0.0), 0.16)
+    data["dehaze"] = min(float(data.get("dehaze") or 0.0), 0.06)
+    data["clarity"] = min(float(data.get("clarity") or 0.0), 0.08)
+    data["vignette"] = min(float(data.get("vignette") or 0.0), 0.16)
+    if technical.saturation_mean > 0.48:
+        data["vibrance"] = min(float(data.get("vibrance") or 0.0), 0.08)
+        data["saturation"] = min(float(data.get("saturation") or 0.0), 0.04)
+    if technical.mean_luma > 0.62:
+        data["blacks"] = max(float(data.get("blacks") or 0.0), -0.08)
+        data["contrast"] = min(float(data.get("contrast") or 0.0), 0.12)
+    return data
+
+
+def _protect_sky(data: dict, technical: TechnicalReport) -> dict:
+    """A bright sky must not be lifted. Global p95 misses a small hot sky over dark ground."""
+    if technical.top_third_blue <= 0.10:
+        return data
+    data["highlights"] = min(float(data.get("highlights") or 0.0), -0.08)
+    data["whites"] = min(float(data.get("whites") or 0.0), 0.0)
+    data["exposure_ev"] = min(float(data.get("exposure_ev") or 0.0), 0.02)
+    hsl = dict(data.get("hsl") or {})
+    for name in ("aqua", "blue"):
+        node = dict(hsl.get(name) or {})
+        node["lum"] = min(float(node.get("lum") or 0.0), 0.0)
+        hsl[name] = node
+    data["hsl"] = hsl
+    return data
+
+
 def _adapt_to_scene(recipe: Recipe, technical: TechnicalReport, look_id: str) -> Recipe:
     """Keep grades visible, but don't crush a low-key frame or HDR an already-loud JPEG."""
     data = recipe.model_dump()
+    data = _protect_sky(data, technical)
+    if look_id.startswith("hb:"):
+        data["exposure_ev"] = float(np.clip(float(data.get("exposure_ev") or 0.0), -0.12, 0.12))
+        if technical.skin_fraction > 0.10:
+            data["saturation"] = float(np.clip(float(data["saturation"]), -0.16, 0.08))
+            data["temperature"] = float(np.clip(float(data["temperature"]), -18.0, 22.0))
+        if technical.mean_luma < 0.12:
+            data["shadows"] = min(float(data["shadows"]), 0.06)
+            data["blacks"] = max(float(data["blacks"]), -0.28)
     if look_id in xmp_look_ids():
         data["exposure_ev"] = 0.0
+        if technical.dynamic_spread > 0.72:
+            data["contrast"] = min(float(data["contrast"]), 0.10)
+            data["clarity"] = min(float(data["clarity"]), 0.08)
+            data["dehaze"] = min(float(data["dehaze"]), 0.05)
+            data["blacks"] = max(float(data["blacks"]), -0.07)
+            data["whites"] = min(float(data["whites"]), 0.03)
+        if technical.highlight_p95 > 0.90:
+            data["whites"] = min(float(data["whites"]), 0.01)
+            data["highlights"] = min(float(data["highlights"]), -0.04)
         if technical.mean_luma < 0.12:
             data["shadows"] = min(float(data["shadows"]), 0.04)
             curve = dict(data.get("curve") or {})
@@ -217,15 +403,24 @@ def _adapt_to_scene(recipe: Recipe, technical: TechnicalReport, look_id: str) ->
                 orange["sat"] = min(float(orange.get("sat", 0.0)), cap)
                 hsl["orange"] = orange
                 data["hsl"] = hsl
-        return Recipe.model_validate(data)
+        return Recipe.model_validate(_soften_developed(data, technical))
     if technical.mean_luma < 0.12:
-        data["blacks"] = max(float(data["blacks"]), -0.16)
-        data["shadows"] = float(np.clip(data["shadows"], -0.10, 0.06))
-        data["vignette"] = min(float(data["vignette"]), 0.20)
-        data["contrast"] = min(float(data["contrast"]), 0.16)
-        data["dehaze"] = min(float(data["dehaze"]), 0.08)
-        data["clarity"] = min(float(data["clarity"]), 0.12)
+        data["blacks"] = max(float(data["blacks"]), -0.10)
+        data["shadows"] = float(np.clip(data["shadows"], -0.06, 0.06))
+        data["vignette"] = min(float(data["vignette"]), 0.12)
+        data["contrast"] = min(float(data["contrast"]), 0.10)
+        data["dehaze"] = min(float(data["dehaze"]), 0.05)
+        data["clarity"] = min(float(data["clarity"]), 0.08)
         data["exposure_ev"] = min(float(data["exposure_ev"]), 0.05)
+    if technical.dynamic_spread > 0.72:
+        data["contrast"] = min(float(data["contrast"]), 0.12)
+        data["clarity"] = min(float(data["clarity"]), 0.10)
+        data["dehaze"] = min(float(data["dehaze"]), 0.06)
+        data["blacks"] = max(float(data["blacks"]), -0.08)
+        data["whites"] = min(float(data["whites"]), 0.04)
+    if technical.highlight_p95 > 0.90:
+        data["whites"] = min(float(data["whites"]), 0.02)
+        data["highlights"] = min(float(data["highlights"]), -0.04)
     if technical.saturation_mean > 0.48:
         data["dehaze"] = min(float(data["dehaze"]), 0.08)
         data["vibrance"] = min(float(data["vibrance"]), 0.06)
@@ -233,12 +428,13 @@ def _adapt_to_scene(recipe: Recipe, technical: TechnicalReport, look_id: str) ->
     if look_id == "faithful":
         data["vignette"] = 0.0
         data["grain"] = min(float(data["grain"]), 0.04)
-    return Recipe.model_validate(data)
+        data["contrast"] = min(float(data["contrast"]), 0.06 if technical.source_kind in {"jpeg", "png"} else 0.12)
+    return Recipe.model_validate(_soften_developed(data, technical))
 
 
 def _scale_recipe(recipe: Recipe, scale: float) -> Recipe:
-    if scale == 1.0:
-        return recipe
+    # Capture detail and geometry come from this photograph, not a look.
+    scale = float(np.clip(scale, 0.0, 1.0))
     data = recipe.model_dump()
     skip = {"hsl", "grade", "curve", "local"}
     for key, value in list(data.items()):
@@ -272,78 +468,81 @@ def _scale_recipe(recipe: Recipe, scale: float) -> Recipe:
     for key, value in loc.items():
         loc[key] = value * scale
     data["local"] = loc
+    data["masks"] = [dict(m.model_dump(), **{key: value * scale for key, value in
+                         m.model_dump(exclude={"target", "reason"}).items()}) for m in recipe.masks]
+    data["parametric_tone"] = recipe.parametric_tone.model_dump()
+    for key in ("shadows", "darks", "lights", "highlights"):
+        data["parametric_tone"][key] *= scale
+    data["color_grading"] = recipe.color_grading.model_dump()
+    for key, value in data["color_grading"].items():
+        if value is not None and (key.endswith("_sat") or key.endswith("_lum")):
+            data["color_grading"][key] = value * scale
+    data["detail"] = {}
+    data["optics"] = {}
+    data["crop"] = {}
     return Recipe.model_validate(data)
 
 
-def local_edit_for(slot: str, technical: TechnicalReport) -> LocalEdit:
+def local_edit_for(
+    slot: str,
+    technical: TechnicalReport,
+    *,
+    genre: str = "general",
+    has_clutter: bool = False,
+) -> LocalEdit:
+    """Retouch-only local finish. Landscape color and atmosphere are not 'dirt'."""
+    developed = technical.source_kind in {"jpeg", "png"}
+    portrait = technical.skin_fraction > 0.08 or genre == "portrait"
+    landscape = genre in {"landscape", "nature"} or (
+        not portrait and (technical.green_fraction > 0.16 or technical.top_third_blue > 0.20)
+    )
+    atmospheric = technical.top_third_blue > 0.12 and technical.highlight_clip < 0.035
     low = technical.mean_luma < 0.12
-    portrait = technical.skin_fraction > 0.08
-    if slot == "A":
-        loc = LocalEdit(
-            color_clean=0.18,
-            subject_sharpen=0.14,
-            clutter_suppress=0.20,
-            defect_heal=0.55,
-            sky_dehaze=0.08,
-        )
-    elif slot == "B":
-        loc = LocalEdit(
-            color_clean=0.34,
-            subject_sharpen=0.30,
-            subject_clarity=0.22,
-            subject_lift=0.0 if low else 0.045,
-            subject_vibrance=0.10,
-            background_darken=0.025 if low else 0.08,
-            background_desat=0.14,
-            sky_dehaze=0.16,
-            clutter_suppress=0.44,
-            defect_heal=0.7,
-        )
-    else:
-        loc = LocalEdit(
-            color_clean=0.42,
-            subject_sharpen=0.38,
-            subject_clarity=0.28,
-            subject_lift=0.01 if low else 0.06,
-            subject_vibrance=0.14,
-            background_darken=0.03 if low else 0.12,
-            background_desat=0.18,
-            sky_dehaze=0.20,
-            clutter_suppress=0.56,
-            defect_heal=0.85,
-        )
+    high_key = technical.mean_luma > 0.55
+
+    # Reference slot on a finished file: do not add a second local grade.
+    if slot == "A" and developed:
+        return LocalEdit()
+
+    loc = LocalEdit()
     if portrait:
-        loc = loc.model_copy(
-            update={
-                "subject_sharpen": loc.subject_sharpen * 0.72,
-                "subject_lift": loc.subject_lift + 0.015,
-                "background_desat": min(0.24, loc.background_desat + 0.04),
-            }
+        loc = LocalEdit(
+            color_clean={"B": 0.16, "C": 0.20}.get(slot, 0.10),
+            subject_lift=0.0 if low else (0.035 if slot == "B" else 0.045),
+            subject_vibrance=0.06 if slot == "B" else 0.08,
+            background_desat=0.08 if slot == "B" else 0.11,
+            background_darken=0.0 if low or high_key else (0.03 if slot == "B" else 0.045),
+            clutter_suppress=0.18 if has_clutter else 0.0,
         )
+        return loc
+
+    if landscape:
+        sky_dehaze = 0.0
+        if technical.highlight_clip > 0.025 and not atmospheric:
+            sky_dehaze = 0.06 if slot == "B" else 0.08
+        loc = LocalEdit(
+            sky_dehaze=sky_dehaze,
+            clutter_suppress=0.16 if has_clutter else 0.0,
+            background_darken=0.0 if high_key or low else (0.02 if slot == "B" else 0.03),
+        )
+        return loc
+
+    if has_clutter:
+        loc = loc.model_copy(update={"clutter_suppress": 0.18 if slot == "B" else 0.24})
     return loc
 
 
-def _why(slot: str, look, critique: Critique, amount: float = 1.0, geom=None) -> str:
-    if look.id == "faithful":
-        bits = ["对照基准：只做技术校正，方便你判断另外两套味道有没有过。"]
-        if geom is not None and not geom.is_noop() and abs(geom.rotate_deg) > 0.2:
-            bits.append(geom.why or "只做了水平校正。")
-        return " ".join(bits)
+def _why(slot: str, look, critique: Critique, amount: float = 1.0, geom=None, match: float = 0.0) -> str:
+    labels = {"A": "稳妥救片", "B": "最佳匹配", "C": "方向分叉"}
     top = critique.issues[0].note if critique.issues else critique.summary
     extra = ""
     if geom is not None and not geom.is_noop() and geom.why:
         extra = f" {geom.why}。"
-    if look.source == "xmp":
-        mix = f"按画面只用了预设的 {int(round(amount * 100))}% ，不是整份套 LUT。"
-        return f"{look.description} {mix} 分层：干净颜色、主体清晰、压干扰。针对：{top}{extra}"
-    return f"{look.description} 分层：干净颜色、主体清晰、压干扰。针对：{top}{extra}"
+    score = int(round(match * 100)) if look.id != "celebrity_rescue" else max(58, int(round(amount * 72)))
+    mix = f"按当前画面只保留约 {int(round(amount * 100))}% 的风格强度"
+    return f"{labels.get(slot, '候选路线')}：模仿「{look.title}」，适配度约 {score}%。{look.description} {mix}，不是照抄示范参数。优先处理：{top}{extra}"
 
 
 def describe_taste(conn: sqlite3.Connection) -> str:
-    stats = look_stats(conn)
-    if not stats["total_picks"]:
-        return "还没有打分记录。选一张你更想要的，系统会记住你的味道。"
-    ranked = sorted(stats["looks"], key=lambda r: r["wins"], reverse=True)
-    top = LOOKS.get(ranked[0]["look_id"])
-    name = top.title if top else ranked[0]["look_id"]
-    return f"已积累 {stats['total_picks']} 次选择，目前更常留下「{name}」。"
+    from .scene_preferences import taste_summary
+    return taste_summary(conn)

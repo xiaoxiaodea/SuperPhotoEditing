@@ -5,22 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>SuperPhoto · 诊断 · 配方 · 裁决</title>
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,480;9..144,600&family=Outfit:wght@320;400;500;600&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="./styles.css?v=5" />
+    <style>
+      html, body { margin: 0; min-height: 100%; background: #0c0b09; color: #f4efe4; }
+    </style>
+    <link rel="stylesheet" href="./styles.css?v=18" />
   </head>
   <body>
-    <div class="grain" aria-hidden="true"></div>
     <header class="top">
       <div class="brand">
         <span class="mark" aria-hidden="true"></span>
         <div>
           <strong>SuperPhoto</strong>
-          <span>诊断 · 配方 · 裁决</span>
+          <span>缺陷 · 路线 · 仿色 · Lightroom</span>
         </div>
       </div>
       <div class="health" id="health">正在检查引擎…</div>
@@ -31,10 +27,9 @@
         <form id="drop" class="drop" tabindex="0">
           <input id="file" type="file" accept=".jpg,.jpeg,.png,.tif,.tiff,.arw,.cr2,.cr3,.nef,.dng,.raf,.orf,.rw2,.pef,.srw,.raw" hidden />
           <p class="kicker">把一张照片放进来</p>
-          <h1>先看它缺什么，再决定味道</h1>
+          <h1>先看缺陷，再选路线与仿色风格</h1>
           <p class="lede">
-            本地分析曝光与色彩，AI 给出问题清单，然后用三套可解释的后期配方出图。
-            你来选哪一张更像你要的。RAW 优先，JPEG 也能跑。
+            先读影调、色调和画面目的，再判断适合的后期路线与名人风格；A/B/C 三套方案都由 Lightroom 完成后期与导出，完成后再由你选择。
           </p>
           <button type="button" class="btn primary" id="pick">选择文件</button>
           <p class="hint">支持 JPEG / TIFF / PNG / 常见 RAW · 单张不超过 80MB</p>
@@ -49,11 +44,14 @@
             <p id="progress-file" class="filename"></p>
           </div>
           <ol class="steps" id="steps">
+            <li data-step="connect">连接</li>
             <li data-step="ingest">读取</li>
             <li data-step="analyze">分析</li>
+            <li data-step="restore">修复</li>
             <li data-step="critique">诊断</li>
-            <li data-step="render">渲染</li>
+            <li data-step="render">配方</li>
             <li data-step="qa">自检</li>
+            <li data-step="lightroom">Lightroom</li>
           </ol>
         </div>
       </section>
@@ -76,20 +74,34 @@
               <div class="chips" id="tech-chips"></div>
               <div class="donot" id="donot"></div>
             </div>
+            <div class="panel route-panel">
+              <p class="kicker">读图卡与路线</p>
+              <dl class="read-card">
+                <div><dt>影调</dt><dd id="tone-card"></dd></div>
+                <div><dt>色调</dt><dd id="color-card"></dd></div>
+                <div><dt>目的</dt><dd id="purpose-card"></dd></div>
+              </dl>
+              <div class="route-choice">
+                <span>推荐路线</span>
+                <h3 id="route-title"></h3>
+                <p id="route-reason"></p>
+              </div>
+              <div class="manual-gaps" id="manual-gaps"></div>
+            </div>
           </aside>
 
           <section class="studio">
             <div class="studio-head">
               <div>
-                <p class="kicker">三套配方</p>
-                <h2>选一张你更想留下的</h2>
+                <p class="kicker" id="result-count">后期成片</p>
+                <h2>挑选喜欢的，也告诉我们哪些不合心意</h2>
               </div>
               <p class="taste" id="taste"></p>
             </div>
             <div class="hero-compare" id="hero-compare">
               <figure>
                 <img id="hero-orig" alt="原片" />
-                <figcaption>原片</figcaption>
+                <figcaption id="hero-before-label">原片</figcaption>
               </figure>
               <figure>
                 <img id="hero-edit" alt="后期" />
@@ -99,27 +111,10 @@
                 </figcaption>
               </figure>
             </div>
-            <p class="compare-hint">点选下方方案。按住右侧照片或空格，对照原片看后期差了多少。</p>
+            <p class="compare-hint">每张都可以标记满意或不满意，再次点击可撤销。不评价的图不会影响偏好。选中一张，还能输入意见继续微调。</p>
             <div class="variants" id="variants"></div>
+            <p class="compare-hint hidden" id="delivery-note"></p>
             <div class="judge hidden" id="judge">
-              <p class="kicker">给系统一点反馈</p>
-              <div class="scores">
-                <label>技术 <span data-score="technical"></span>
-                  <input type="range" min="1" max="5" value="4" id="score-technical" />
-                </label>
-                <label>味道 <span data-score="style"></span>
-                  <input type="range" min="1" max="5" value="4" id="score-style" />
-                </label>
-                <label>克制 <span data-score="restraint"></span>
-                  <input type="range" min="1" max="5" value="4" id="score-restraint" />
-                </label>
-              </div>
-              <textarea id="notes" rows="2" placeholder="可选：哪里过了，哪里还不够…"></textarea>
-              <div class="judge-actions">
-                <button class="btn primary" id="submit">确认这张更好</button>
-                <button class="btn ghost" id="again">再来一张</button>
-              </div>
-              <p class="ok hidden" id="thanks"></p>
             </div>
           </section>
         </div>
@@ -130,10 +125,11 @@
           <p class="kicker">没有跑通</p>
           <h2 id="error-title">处理失败</h2>
           <p id="error-body"></p>
-          <button class="btn primary" id="error-reset">返回</button>
+          <button class="btn primary hidden" id="error-retry">重试这张照片</button>
+          <button class="btn" id="error-reset">重新选照片</button>
         </div>
       </section>
     </main>
-    <script src="./app.js?v=5"></script>
+    <script src="./app.js?v=18"></script>
   </body>
 </html>
