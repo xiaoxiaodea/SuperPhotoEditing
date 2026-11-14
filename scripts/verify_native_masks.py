@@ -1,14 +1,12 @@
-"""Exercise real Lightroom masks on a new copy, preserving the input file.
+"""Exercise LightCraft masks on a new copy, preserving the input file.
 
 Run with the project Python: scripts/verify_native_masks.py PHOTO [--restart].
-Requires Lightroom Classic and the updated bundled plugin to be installed.
+Requires lightcraft-cli. --restart does nothing; there is no host app to reload.
 """
 from pathlib import Path
 import argparse
 import json
 import shutil
-import subprocess
-import time
 from uuid import uuid4
 
 from superphoto.lightroom import (
@@ -19,17 +17,7 @@ from superphoto.models import ColorGradingControls, MaskAdjustment, Recipe
 
 
 def restart_lightroom():
-    print("Reloading Lightroom for the validation connection", flush=True)
-    subprocess.run(["osascript", "-e", 'tell application "Adobe Lightroom Classic" to quit'], check=True, timeout=90)
-    for _ in range(45):
-        status = subprocess.run(["osascript", "-e", 'application "Adobe Lightroom Classic" is running'],
-                                capture_output=True, text=True, check=True)
-        if status.stdout.strip() == "false":
-            break
-        time.sleep(1)
-    else:
-        raise RuntimeError("Lightroom has not quit; no process was force-terminated")
-    subprocess.run(["open", "-a", "Adobe Lightroom Classic"], check=True)
+    print("LightCraft 没有需要重启的应用；--restart 已忽略", flush=True)
 
 
 def main():

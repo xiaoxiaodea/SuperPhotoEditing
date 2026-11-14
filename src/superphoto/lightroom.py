@@ -1,8 +1,7 @@
-"""Local MCP bridge and Lightroom Classic finishing workflow.
+"""LightCraft finishing workflow.
 
-The bridge speaks newline-delimited JSON-RPC to the vendored Lightroom MCP
-server. SuperPhoto imports its private job copy, never the user's master file,
-then applies one selected recipe as bounded Lightroom Develop settings.
+Recipes are still planned as slider values. Rendering runs lightcraft-cli on a
+private copy of the photo. Originals are never overwritten.
 """
 
 from __future__ import annotations
@@ -11,22 +10,18 @@ import atexit
 import colorsys
 import json
 import math
-import os
-import queue
-import shutil
-import subprocess
-import sys
 import threading
 import time
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .models import ColorGradingControls, Grade, Recipe
 
-_PROTOCOL_VERSION = "2025-06-18"
 _HUES = ("red", "orange", "yellow", "green", "aqua", "blue", "purple", "magenta")
+_client = None
+_client_lock = threading.Lock()
+_connection_lock = threading.Lock()
 _PROFESSIONAL_STAGES = (
     "color-foundation",
     "technical-correction",
@@ -37,274 +32,39 @@ _PROFESSIONAL_STAGES = (
 )
 
 
-class LightroomError(RuntimeError):
-    """A user-actionable Lightroom bridge failure."""
+from .lightcraft import LightCraftError as LightroomError
 
 
-@dataclass
-class LightroomRuntime:
-    command: list[str]
-    cwd: Path
+class LightCraftRuntime:
+    """Retained name for callers that only need to know a CLI was found."""
+
+    def __init__(self, binary: Path):
+        self.binary = binary
+        self.command = [str(binary)]
+        self.cwd = binary.parent
 
 
-def project_root() -> Path:
-    configured = os.environ.get("SUPERPHOTO_ROOT")
-    if configured:
-        return Path(configured).expanduser().resolve()
-    return Path(__file__).resolve().parents[2]
+def discover_runtime(server_path: Path | None = None) -> LightCraftRuntime | None:
+    from .lightcraft import discover_cli
+    binary = discover_cli(server_path)
+    return LightCraftRuntime(binary) if binary else None
 
 
-def _discover_node() -> Path | None:
-    configured = os.environ.get("SUPERPHOTO_NODE")
-    candidates: list[Path] = []
-    if configured:
-        candidates.append(Path(configured).expanduser())
-    candidates.extend(
-        [
-            Path.home() / "Library" / "Application Support" / "SuperPhoto" / "runtime" / "node",
-            Path("/opt/homebrew/bin/node"),
-            Path("/usr/local/bin/node"),
-            Path("/usr/bin/node"),
-        ]
-    )
-    found = shutil.which("node")
-    if found:
-        candidates.append(Path(found))
-    for candidate in candidates:
-        try:
-            resolved = candidate.resolve()
-        except OSError:
-            continue
-        if resolved.is_file() and os.access(resolved, os.X_OK):
-            return resolved
-    return None
-
-
-def discover_runtime(server_path: Path | None = None) -> LightroomRuntime | None:
-    root = project_root()
-    candidates: list[Path] = []
-    if server_path:
-        candidates.append(server_path.expanduser())
-    configured = os.environ.get("SUPERPHOTO_LIGHTROOM_MCP_SERVER")
-    if configured:
-        candidates.append(Path(configured).expanduser())
-    candidates.extend(
-        [
-            root / "vendor" / "lightroom-mcp" / "server" / "dist" / "index.js",
-            root / "vendor" / "lightroom-mcp" / "server" / "src" / "index.ts",
-        ]
-    )
-    node = _discover_node()
-    if not node:
-        return None
-    for candidate in candidates:
-        candidate = candidate.resolve()
-        if candidate.is_file() and candidate.suffix == ".js":
-            return LightroomRuntime([str(node), str(candidate), "stdio"], candidate.parent)
-    return None
-
-
-class LightroomMcpClient:
-    def __init__(self, runtime: LightroomRuntime, timeout: float = 35.0):
-        self.runtime = runtime
-        self.timeout = timeout
-        self._process: subprocess.Popen[str] | None = None
-        self._responses: queue.Queue[dict[str, Any]] = queue.Queue()
-        self._stderr: list[str] = []
-        self._id = 0
-        self._lock = threading.RLock()
-        self._tools: set[str] = set()
-
-    def start(self) -> None:
-        with self._lock:
-            if self._process and self._process.poll() is None:
-                return
-            env = os.environ.copy()
-            self._process = subprocess.Popen(
-                self.runtime.command,
-                cwd=self.runtime.cwd,
-                env=env,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                bufsize=1,
-            )
-            threading.Thread(target=self._read_stdout, daemon=True).start()
-            threading.Thread(target=self._read_stderr, daemon=True).start()
-            self._request(
-                "initialize",
-                {
-                    "protocolVersion": _PROTOCOL_VERSION,
-                    "capabilities": {},
-                    "clientInfo": {"name": "SuperPhoto", "version": "0.1.0"},
-                },
-                timeout=10.0,
-            )
-            self._notify("notifications/initialized", {})
-            listed = self._request("tools/list", {}, timeout=10.0)
-            self._tools = {tool["name"] for tool in listed.get("tools", []) if isinstance(tool, dict) and tool.get("name")}
-
-    def close(self) -> None:
-        with self._lock:
-            proc = self._process
-            self._process = None
-            self._tools.clear()
-            if not proc:
-                return
-            if proc.stdin:
-                try:
-                    proc.stdin.close()
-                except OSError:
-                    pass
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-
-    @property
-    def tools(self) -> set[str]:
-        self.start()
-        return set(self._tools)
-
-    def call_tool(self, name: str, arguments: dict[str, Any] | None = None, *, timeout: float | None = None) -> Any:
-        self.start()
-        if name not in self._tools:
-            raise LightroomError(f"Lightroom MCP 不支持工具：{name}")
-        result = self._request(
-            "tools/call",
-            {"name": name, "arguments": arguments or {}},
-            timeout=timeout or self.timeout,
-        )
-        if result.get("isError"):
-            text = _content_text(result)
-            raise LightroomError(text or f"Lightroom 工具 {name} 执行失败")
-        text = _content_text(result)
-        if not text:
-            return result
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return text
-
-    def status(self) -> dict[str, Any]:
-        try:
-            self.start()
-        except Exception as exc:
-            return {"available": True, "connected": False, "error": str(exc), "tools": []}
-        try:
-            selection = self.call_tool("get_selected_photos", {"limit": 1, "offset": 0}, timeout=5.0)
-            return {
-                "available": True,
-                "connected": True,
-                "selected": int(selection.get("count", 0)) if isinstance(selection, dict) else 0,
-                "tools": sorted(self._tools),
-            }
-        except Exception as exc:
-            return {"available": True, "connected": False, "error": str(exc), "tools": sorted(self._tools)}
-
-    def _request(self, method: str, params: dict[str, Any], *, timeout: float) -> dict[str, Any]:
-        with self._lock:
-            proc = self._require_process()
-            self._id += 1
-            request_id = self._id
-            payload = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
-            assert proc.stdin is not None
-            try:
-                proc.stdin.write(json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n")
-                proc.stdin.flush()
-            except (BrokenPipeError, OSError) as exc:
-                raise LightroomError(f"Lightroom MCP 进程已退出：{exc}") from exc
-            deadline = time.monotonic() + timeout
-            deferred: list[dict[str, Any]] = []
-            while time.monotonic() < deadline:
-                try:
-                    message = self._responses.get(timeout=max(0.05, deadline - time.monotonic()))
-                except queue.Empty:
-                    break
-                if message.get("id") != request_id:
-                    deferred.append(message)
-                    continue
-                for item in deferred:
-                    self._responses.put(item)
-                if "error" in message:
-                    error = message["error"]
-                    detail = error.get("message") if isinstance(error, dict) else str(error)
-                    raise LightroomError(detail or f"MCP 请求失败：{method}")
-                return message.get("result") or {}
-            for item in deferred:
-                self._responses.put(item)
-            tail = "；".join(self._stderr[-3:])
-            raise LightroomError(f"Lightroom MCP 请求超时：{method}" + (f"（{tail}）" if tail else ""))
-
-    def _notify(self, method: str, params: dict[str, Any]) -> None:
-        proc = self._require_process()
-        assert proc.stdin is not None
-        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": method, "params": params}, separators=(",", ":")) + "\n")
-        proc.stdin.flush()
-
-    def _require_process(self) -> subprocess.Popen[str]:
-        if not self._process or self._process.poll() is not None:
-            code = self._process.poll() if self._process else None
-            tail = "；".join(self._stderr[-4:])
-            raise LightroomError(f"Lightroom MCP 无法启动（退出码 {code}）" + (f"：{tail}" if tail else ""))
-        return self._process
-
-    def _read_stdout(self) -> None:
-        proc = self._process
-        if not proc or not proc.stdout:
-            return
-        for line in proc.stdout:
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(message, dict) and "id" in message:
-                self._responses.put(message)
-
-    def _read_stderr(self) -> None:
-        proc = self._process
-        if not proc or not proc.stderr:
-            return
-        for line in proc.stderr:
-            text = line.strip()
-            if text:
-                self._stderr.append(text)
-                del self._stderr[:-30]
-
-
-def _content_text(result: dict[str, Any]) -> str:
-    chunks = result.get("content") or []
-    return "\n".join(str(item.get("text", "")) for item in chunks if isinstance(item, dict) and item.get("type") == "text")
-
-
-_client_lock = threading.Lock()
-_client: LightroomMcpClient | None = None
-
-
-def get_lightroom_client(server_path: Path | None = None) -> LightroomMcpClient:
+def get_lightroom_client(server_path: Path | None = None):
+    """Return the process-wide LightCraft renderer."""
+    from .lightcraft import LightCraftClient, LightCraftError, discover_cli
     global _client
     with _client_lock:
         if _client is None:
-            runtime = discover_runtime(server_path)
-            if runtime is None:
-                raise LightroomError("未找到可运行的 Lightroom MCP（需要 Node.js 和已构建的随附服务）")
-            _client = LightroomMcpClient(runtime)
+            binary = discover_cli(server_path)
+            if binary is None:
+                raise LightCraftError("未找到 lightcraft-cli。请运行 uv run superphoto install-lightcraft。")
+            _client = LightCraftClient(binary)
         return _client
 
 
-def wait_for_lightroom_connection(
-    client: LightroomMcpClient,
-    *,
-    timeout: float = 12.0,
-    interval: float = 0.5,
-) -> dict[str, Any]:
-    """Wait for both plugin sockets to settle instead of failing a cold start."""
+def wait_for_lightroom_connection(client, *, timeout: float = 12.0, interval: float = 0.5) -> dict[str, Any]:
+    """Confirm the CLI answers. There is no plugin socket to wait on."""
     deadline = time.monotonic() + timeout
     status: dict[str, Any] = {"available": True, "connected": False, "tools": []}
     while True:
@@ -316,66 +76,33 @@ def wait_for_lightroom_connection(
         time.sleep(interval)
 
 
-def reconnect_lightroom_client(server_path: Path | None = None) -> LightroomMcpClient:
-    """Replace a stale single-client bridge after the plugin becomes available."""
+def reconnect_lightroom_client(server_path: Path | None = None):
     close_lightroom_client()
     return get_lightroom_client(server_path)
 
 
-def wake_lightroom_plugin() -> None:
-    """Ask Lightroom to start its plugin through its SDK URL handler.
-
-    Opening the app also handles a cold launch. Older installed plugins do
-    not have the handler; avoid sending an unknown URL to those versions.
-    This never quits Lightroom or depends on Accessibility permissions.
-    """
-    if sys.platform != "darwin":
-        return
-    command = ["open", "-a", "Adobe Lightroom Classic"]
-    info = (Path.home() / "Library/Application Support/Adobe/Lightroom/Modules"
-            / "LightroomMCP.lrplugin/Info.lua")
-    if info.is_file() and "PluginURLHandler.lua" in info.read_text(encoding="utf-8"):
-        command.append("lightroom://com.lightroom.mcp/start-server")
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise LightroomError("无法打开 Lightroom Classic，请打开它后重试这张照片。") from exc
-    if result.returncode:
-        raise LightroomError("无法打开 Lightroom Classic，请确认已安装并能正常打开，再重试这张照片。")
-
-
-_connection_lock = threading.Lock()
-
-
-def connect_lightroom(server_path: Path | None = None) -> tuple[LightroomMcpClient, dict[str, Any]]:
-    """Recover the plugin as well as the bridge before processing a photo."""
+def connect_lightroom(server_path: Path | None = None):
+    """Open the LightCraft CLI before processing a photo."""
+    from .lightcraft import LightCraftError
     with _connection_lock:
-        client = get_lightroom_client(server_path)
+        try:
+            client = get_lightroom_client(server_path)
+        except LightCraftError:
+            raise
         status = client.status()
-        if status.get("connected"):
-            return client, status
-        wake_lightroom_plugin()
-        status = wait_for_lightroom_connection(client, timeout=30.0)
         if not status.get("connected"):
-            client = reconnect_lightroom_client(server_path)
-            # A URL delivered while Lightroom is still launching may be
-            # ignored. Send it once more after the cold-start waiting period.
-            wake_lightroom_plugin()
-            status = wait_for_lightroom_connection(client, timeout=12.0)
-        if not status.get("connected"):
-            detail = str(status.get("error") or "plugin did not respond")
-            raise LightroomError(
-                "Lightroom 尚未准备好。请在 Lightroom 完成启动或关闭弹出的对话框，"
-                "再点“重试这张照片”。如果仍未连接，请在“文件 → 增效工具管理器”中"
-                "启用 Lightroom MCP，并点击 Start Server。"
-            ) from LightroomError(detail)
+            detail = str(status.get("error") or "lightcraft-cli did not respond")
+            raise LightCraftError(
+                "LightCraft 还不能出片。请运行 uv run superphoto install-lightcraft，"
+                "或把 lightcraft-cli 放到 PATH 后再重试这张照片。"
+            ) from LightCraftError(detail)
         return client, status
 
 
 def close_lightroom_client() -> None:
     global _client
     with _client_lock:
-        if _client:
+        if _client is not None:
             _client.close()
         _client = None
 
@@ -384,19 +111,29 @@ atexit.register(close_lightroom_client)
 
 
 def lightroom_status(enabled: bool = True, server_path: Path | None = None) -> dict[str, Any]:
-    runtime = discover_runtime(server_path)
+    from .lightcraft import discover_cli
+    binary = discover_cli(server_path)
     if not enabled:
-        return {"enabled": False, "available": runtime is not None, "connected": False, "tools": []}
-    if runtime is None:
-        return {"enabled": True, "available": False, "connected": False, "error": "未找到随附 Lightroom MCP", "tools": []}
+        return {"enabled": False, "available": binary is not None, "connected": False, "engine": "lightcraft", "tools": []}
+    if binary is None:
+        return {
+            "enabled": True,
+            "available": False,
+            "connected": False,
+            "engine": "lightcraft",
+            "error": "未找到 lightcraft-cli。运行 uv run superphoto install-lightcraft",
+            "tools": [],
+        }
     with _client_lock:
         active = _client
     if active is None:
         return {
             "enabled": True,
             "available": True,
-            "connected": False,
-            "error": "将在首次执行自动后期时连接 Lightroom",
+            "connected": True,
+            "engine": "lightcraft",
+            "binary": str(binary),
+            "error": None,
             "tools": [],
         }
     status = active.status()
@@ -405,56 +142,17 @@ def lightroom_status(enabled: bool = True, server_path: Path | None = None) -> d
 
 
 def check_lightroom_connection(server_path: Path | None = None) -> dict[str, Any]:
-    runtime = discover_runtime(server_path)
-    if runtime is None:
-        return {"available": False, "connected": False, "error": "未找到随附 Lightroom MCP", "tools": []}
+    from .lightcraft import discover_cli
+    if discover_cli(server_path) is None:
+        return {"available": False, "connected": False, "engine": "lightcraft", "error": "未找到 lightcraft-cli", "tools": []}
     return get_lightroom_client(server_path).status()
 
 
 def install_lightroom_plugin(server_path: Path | None = None) -> dict[str, Any]:
-    runtime = discover_runtime(server_path)
-    if runtime is None:
-        raise LightroomError("未找到可运行的 Lightroom MCP")
-    source = _bundled_plugin_dir(runtime)
-    destination = Path.home() / "Library" / "Application Support" / "Adobe" / "Lightroom" / "Modules" / "LightroomMCP.lrplugin"
-    if source is None:
-        command = [*runtime.command[:-1], "install-plugin"]
-        completed = subprocess.run(command, cwd=runtime.cwd, text=True, capture_output=True, timeout=30)
-        detail = (completed.stderr or completed.stdout).strip()
-        if completed.returncode != 0:
-            raise LightroomError(detail or "Lightroom 插件安装失败")
-        return {"ok": True, "message": detail or "Lightroom 插件已安装", "restart_required": True}
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    backup = destination.with_name(f"{destination.name}.backup-{uuid.uuid4().hex[:8]}")
-    try:
-        if destination.exists():
-            destination.rename(backup)
-        shutil.copytree(source, destination)
-    except Exception as exc:
-        shutil.rmtree(destination, ignore_errors=True)
-        if backup.exists():
-            backup.rename(destination)
-        raise LightroomError(f"Lightroom 插件更新失败，已恢复旧版本：{exc}") from exc
-    else:
-        shutil.rmtree(backup, ignore_errors=True)
-    return {
-        "ok": True,
-        "message": f"Lightroom 插件已更新：{destination}",
-        "restart_required": True,
-        "destination": str(destination),
-    }
-
-
-def _bundled_plugin_dir(runtime: LightroomRuntime) -> Path | None:
-    for base in (runtime.cwd, *runtime.cwd.parents):
-        for candidate in (
-            base / "plugin" / "LightroomMCP.lrplugin",
-            base / "LightroomMCP.lrplugin",
-        ):
-            if candidate.is_dir() and (candidate / "Info.lua").is_file():
-                return candidate
-    return None
+    """Install the pinned LightCraft CLI. The historical name calls the new installer."""
+    from .lightcraft import install_cli
+    destination = server_path if server_path is not None and server_path.suffix != ".js" else None
+    return install_cli(destination)
 
 
 def native_color_recipe(recipe: Recipe, *, audit: dict[str, Any] | None = None) -> Recipe:
@@ -755,7 +453,7 @@ def checkpoint_fields(settings: dict[str, Any]) -> list[str]:
 
 
 def create_lightroom_checkpoint(
-    client: LightroomMcpClient,
+    client: Any,
     *,
     photo: Path,
     name: str,
@@ -775,7 +473,7 @@ def create_lightroom_checkpoint(
 
 
 def export_lightroom_baseline(
-    client: LightroomMcpClient,
+    client: Any,
     *,
     original: Path,
     output_dir: Path,
@@ -809,7 +507,7 @@ def _attenuate_tonal_recipe(recipe: Recipe, before: dict, strength: float) -> Re
 
 
 def apply_professional_recipe(
-    client: LightroomMcpClient,
+    client: Any,
     *,
     original: Path,
     recipe: Recipe,
@@ -835,7 +533,7 @@ def apply_professional_recipe(
     for index, (stage_name, stage_recipe) in enumerate(stages, start=1):
         if stage_name == "local-light":
             if "apply_ai_mask" not in client.tools:
-                raise LightroomError("当前 Lightroom 插件缺少原生局部蒙版接口，请安装工程内更新后的插件并重新加载。")
+                raise LightroomError("当前 LightCraft 不能使用局部蒙版。请运行 uv run superphoto install-lightcraft 后重试。")
             before_local = last_export
             for target, values in native_mask_settings(stage_recipe):
                 result = client.call_tool("apply_ai_mask", {"photo_id": str(original), "target": target, "settings": values}, timeout=100.0)
@@ -845,7 +543,7 @@ def apply_professional_recipe(
                     skipped_masks.append(result)
                     continue
                 if not isinstance(result, dict) or not result.get("success") or not result.get("mask_id"):
-                    raise LightroomError(f"Lightroom {target} 蒙版未确认完成")
+                    raise LightroomError(f"LightCraft {target} 蒙版未确认完成")
                 mask_records.append(result)
             stage_dir = output_dir / f"{index:02d}-local-light"
             last_export = _render_stage_feedback(client, original, stage_dir, export_edge=export_edge)
@@ -870,7 +568,7 @@ def apply_professional_recipe(
                         result = client.call_tool("apply_ai_mask", {"photo_id": str(original), "target": target,
                             "settings": values}, timeout=100.0)
                         if not isinstance(result, dict) or not result.get("success") or result.get("mask_id") != owned_masks[target]:
-                            raise LightroomError(f"Lightroom {target} 蒙版高光修正未确认完成")
+                            raise LightroomError(f"LightCraft {target} 蒙版高光修正未确认完成")
                         revised.append(result)
                     mask_records = revised
                     last_export = _render_stage_feedback(client, original, stage_dir / f"whites-{strength:.2f}", export_edge=export_edge)
@@ -920,7 +618,7 @@ def apply_professional_recipe(
                     actual = current.get(key)
                     if (isinstance(actual, bool) or not isinstance(actual, (int, float))
                             or not math.isfinite(actual) or abs(actual - expected) > .51):
-                        raise LightroomError(f"Lightroom 颜色分级未正确回读：{key}，请求 {expected}，实际 {actual}")
+                        raise LightroomError(f"LightCraft 颜色分级未正确回读：{key}，请求 {expected}，实际 {actual}")
         stage_dir = output_dir / f"{index:02d}-{stage_name}"
         exported = _render_stage_feedback(client, original, stage_dir, export_edge=export_edge)
         review = None
@@ -1029,7 +727,7 @@ def apply_professional_recipe(
 
 
 def apply_recipe_pass(
-    client: LightroomMcpClient,
+    client: Any,
     *,
     original: Path,
     recipe: Recipe,
@@ -1049,7 +747,7 @@ def apply_recipe_pass(
 
 
 def finish_job_in_lightroom(
-    client: LightroomMcpClient,
+    client: Any,
     *,
     original: Path,
     recipe: Recipe,
@@ -1085,7 +783,7 @@ def finish_job_in_lightroom(
     return {**result, "audit": audit_path}
 
 
-def _ensure_photo(client: LightroomMcpClient, original: Path) -> dict[str, Any]:
+def _ensure_photo(client: Any, original: Path) -> dict[str, Any]:
     if not original.is_file():
         raise LightroomError(f"找不到作业底片：{original}")
     try:
@@ -1098,7 +796,7 @@ def _ensure_photo(client: LightroomMcpClient, original: Path) -> dict[str, Any]:
 
 
 def _render_stage_feedback(
-    client: LightroomMcpClient,
+    client: Any,
     original: Path,
     output_dir: Path,
     *,
@@ -1109,7 +807,7 @@ def _render_stage_feedback(
 
 
 def _export_photo(
-    client: LightroomMcpClient,
+    client: Any,
     original: Path,
     output_dir: Path,
     *,
@@ -1134,7 +832,7 @@ def _export_photo(
         reverse=True,
     )
     if not exported:
-        raise LightroomError("Lightroom 报告导出成功，但输出目录没有 JPEG")
+        raise LightroomError("LightCraft 报告导出成功，但输出目录没有 JPEG")
     return exported[0]
 
 

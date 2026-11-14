@@ -1,8 +1,8 @@
-"""Quality gate for JPEGs rendered by Lightroom Classic.
+"""Quality gate for JPEGs rendered by LightCraft.
 
 The local renderer is intentionally not used here: this module re-opens the
-pixels that Lightroom exported, compares them with a Lightroom baseline, and
-produces bounded corrective recipes for one or two refinement passes.
+exported pixels, compares them with the unedited baseline, and produces
+bounded corrective recipes for one or two refinement passes.
 """
 
 from __future__ import annotations
@@ -236,7 +236,7 @@ def assess_lightroom_render(
             LightroomQualityIssue(
                 "too_dark",
                 _severity(0.62, luma_ratio, 0.28),
-                f"整体亮度只有 Lightroom 基线的 {luma_ratio:.0%}" + recovery_note,
+                f"整体亮度只有 LightCraft 基线的 {luma_ratio:.0%}" + recovery_note,
                 hard=not highlight_recovery, advisory=bool(highlight_recovery),
             )
         )
@@ -245,7 +245,7 @@ def assess_lightroom_render(
             LightroomQualityIssue(
                 "too_bright",
                 _severity(luma_ratio, 1.62, 0.55),
-                f"整体亮度达到 Lightroom 基线的 {luma_ratio:.0%}",
+                f"整体亮度达到 LightCraft 基线的 {luma_ratio:.0%}",
             )
         )
 
@@ -257,7 +257,7 @@ def assess_lightroom_render(
             LightroomQualityIssue(
                 "excessive_distance",
                 _severity(out_metrics.perceptual_distance, distance_limit, 18.0),
-                f"与 Lightroom 基线的平均感知距离 {out_metrics.perceptual_distance:.1f} 过大",
+                f"与 LightCraft 基线的平均感知距离 {out_metrics.perceptual_distance:.1f} 过大",
                 hard=slot == "A" or out_metrics.perceptual_distance > 36.0,
             )
         )

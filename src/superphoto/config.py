@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     semantic_min_confidence: float = 0.48
     lightroom_enabled: bool = True
     lightroom_mcp_server: Path | None = None
+    # Executable lightcraft-cli. Empty uses PATH, then vendor/lightcraft/lightcraft-cli.
+    lightcraft_bin: Path | None = None
     lightroom_export_edge: int = 2400
     lightroom_qa_min_score: float = 82.0
     lightroom_qa_max_refinements: int = 2

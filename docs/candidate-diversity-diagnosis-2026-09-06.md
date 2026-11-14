@@ -71,7 +71,7 @@
   960ab2c5-f49e-48f7-b977-fe48a4bfadbd \
   2ae468b5-34aa-450d-93b4-479e84499296 \
   fafd8f4a-92b9-4a4e-abd9-d00a6f016522 \
-  --data '/Users/dextermosby/Library/Application Support/SuperPhoto/data' \
+  --data "$HOME/Library/Application Support/SuperPhoto/data" \
   --out .task-cache/candidate-diversity-audit.json
 ```
 

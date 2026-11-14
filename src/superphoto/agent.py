@@ -77,7 +77,7 @@ class SuperPhotoClient:
             "lightroom": lightroom,
         }
         if not lightroom.get("connected"):
-            payload["hint"] = "Lightroom 还没连上。修图时会尝试自动连接；若失败，先打开 Lightroom Classic。"
+            payload["hint"] = "LightCraft 还没就绪。修图时会再试一次；若失败，运行 uv run superphoto install-lightcraft。"
         return payload
 
     def edit(self, photo: Path, timeout: float, on_step: StepCallback | None = None) -> dict[str, Any]:

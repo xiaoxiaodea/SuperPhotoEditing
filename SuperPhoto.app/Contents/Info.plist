@@ -16,7 +16,7 @@
   <key>LSEnvironment</key>
   <dict>
     <key>PATH</key>
-    <string>/Users/dextermosby/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticTermination</key><false/>

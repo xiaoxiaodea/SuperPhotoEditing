@@ -225,7 +225,7 @@ def refinement_base(settings, conn, job_id: str, slot: str, parent_id: str | Non
         variant = next((v for v in get_variants(conn, job_id) if v["slot"] == slot), None)
         audit_path = root / "lightroom-audits" / f"variant_{slot}.json"
         if not variant or not audit_path.is_file():
-            raise ValueError("这张图还没有保存完整的 Lightroom 成片记录，暂时不能在它的基础上微调。")
+            raise ValueError("这张图还没有保存完整的成片记录，暂时不能在它的基础上微调。")
         audit = json.loads(audit_path.read_text(encoding="utf-8"))
         recipe = Recipe.model_validate(audit["accepted_recipe"])
         image = root / variant["filename"]
@@ -244,9 +244,9 @@ def run_refinement(settings, conn, refinement_id: str) -> None:
     audit = {"id": refinement_id, "prompt": record["prompt"], "parent_id": record["parent_id"]}
     try:
         if not settings.lightroom_enabled:
-            raise LightroomError("需要启用 Lightroom 才能进行二次调整。")
+            raise LightroomError("需要启用 LightCraft 才能进行二次调整。")
         update_refinement(conn, refinement_id, status="running", step="connect")
-        client, _ = connect_lightroom(settings.lightroom_mcp_server)
+        client, _ = connect_lightroom(settings.lightcraft_bin)
         before, base = refinement_base(settings, conn, record["job_id"], record["slot"], record["parent_id"])
         update_refinement(conn, refinement_id, step="interpret")
         edits, interpreter = interpret_feedback(settings, before, base, record["prompt"])
@@ -270,14 +270,14 @@ def run_refinement(settings, conn, refinement_id: str) -> None:
         effective = Recipe.model_validate(result["effective_recipe"])
         skipped = {m["target"] for m in result.get("skipped_masks", [])}
         if skipped.intersection(m.target for m in edits.masks):
-            raise LightroomError("Lightroom 没有选出需要微调的区域。已保留调整前版本，请换一种描述再试。")
+            raise LightroomError("没有选出需要微调的区域。已保留调整前版本，请换一种描述再试。")
         update_refinement(conn, refinement_id, step="qa")
         qa = assess_lightroom_render(before, output, slot="A", min_score=settings.lightroom_qa_min_score)
         audit["quality"] = qa.to_dict()
         if not qa.accepted:
             raise LightroomError("微调版未通过画质检查，调整前版本已保留。" + "；".join(i.note for i in qa.issues if i.hard))
         if render_distance(before, output) < .12:
-            raise LightroomError("Lightroom 输出没有可见变化，调整前版本已保留。请把希望改变的地方说得更具体。")
+            raise LightroomError("输出没有可见变化，调整前版本已保留。请把希望改变的地方说得更具体。")
         intent = EditIntent(goal=f"在已选成片上只完成用户微调：{record['prompt']}",
                             preserve=["保留用户没有要求改变的构图、内容与既有后期风格"], natural_color=False)
         review = review_render(settings, before, output, intent, "用户指定的二次微调")

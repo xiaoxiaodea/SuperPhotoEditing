@@ -6,14 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from superphoto.lightcraft import LightCraftClient, adobe_to_lightcraft
 from superphoto.lightroom import (
     LightroomError,
-    LightroomMcpClient,
-    LightroomRuntime,
     apply_professional_recipe,
     create_lightroom_checkpoint,
     discover_runtime,
-    install_lightroom_plugin,
     professional_recipe_stages,
     recipe_to_develop_settings,
     wait_for_lightroom_connection,
@@ -48,19 +46,23 @@ def test_wait_for_lightroom_connection_allows_cold_socket_settle() -> None:
     assert client.calls == 3
 
 
-def test_discover_runtime_uses_explicit_node_with_empty_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    node = tmp_path / "node"
-    node.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    node.chmod(0o755)
+def test_discover_runtime_uses_an_executable_cli_and_ignores_the_old_mcp_script(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli = tmp_path / "lightcraft-cli"
+    cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    cli.chmod(0o755)
     server = tmp_path / "index.js"
     server.write_text("", encoding="utf-8")
-    monkeypatch.setenv("SUPERPHOTO_NODE", str(node))
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.delenv("SUPERPHOTO_LIGHTCRAFT_BIN", raising=False)
+    monkeypatch.delenv("SUPERPHOTO_ROOT", raising=False)
+    monkeypatch.setattr("superphoto.lightcraft.bundled_cli_path", lambda: tmp_path / "absent-cli")
 
-    runtime = discover_runtime(server)
-
+    assert discover_runtime(server) is None
+    runtime = discover_runtime(cli)
     assert runtime is not None
-    assert runtime.command == [str(node.resolve()), str(server.resolve()), "stdio"]
+    assert runtime.command == [str(cli.resolve())]
 
 
 def test_recipe_to_develop_settings_is_additive_and_bounded() -> None:
@@ -291,33 +293,47 @@ def test_checkpoint_uses_explicit_sorted_setting_allowlist(tmp_path: Path) -> No
     assert client.arguments["settings"] == ["Exposure2012", "Texture"]
 
 
-def test_install_lightroom_plugin_replaces_existing_bundle_with_rollback_safe_copy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "vendor" / "lightroom-mcp"
-    server = root / "server" / "dist" / "index.js"
-    server.parent.mkdir(parents=True)
-    server.write_text("", encoding="utf-8")
-    plugin = root / "plugin" / "LightroomMCP.lrplugin"
-    plugin.mkdir(parents=True)
-    (plugin / "Info.lua").write_text("return {}", encoding="utf-8")
-    (plugin / "HandlerPreview.lua").write_text("preview", encoding="utf-8")
-    fake_home = tmp_path / "home"
-    installed = fake_home / "Library" / "Application Support" / "Adobe" / "Lightroom" / "Modules" / "LightroomMCP.lrplugin"
-    installed.mkdir(parents=True)
-    (installed / "Info.lua").write_text("old", encoding="utf-8")
-    node = tmp_path / "node"
-    node.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    node.chmod(0o755)
-    monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.setenv("SUPERPHOTO_NODE", str(node))
-
-    result = install_lightroom_plugin(server)
-
-    assert result["ok"] is True
-    assert result["restart_required"] is True
-    assert (installed / "HandlerPreview.lua").read_text(encoding="utf-8") == "preview"
-    assert (installed / "Info.lua").read_text(encoding="utf-8") == "return {}"
+def test_lightcraft_render_translates_sliders_and_writes_the_jpeg(tmp_path: Path) -> None:
+    source = tmp_path / "photo.jpg"
+    source.write_bytes(b"source-bytes")
+    cli = tmp_path / "lightcraft-cli"
+    cli.write_text(
+        """#!/usr/bin/env python3
+import sys
+from pathlib import Path
+args = sys.argv[1:]
+if args and args[0] == "--version":
+    print("lightcraft-cli 0.21.1")
+    raise SystemExit(0)
+output = Path(args[args.index("-o") + 1])
+settings = Path(args[args.index("--settings") + 1]).read_text()
+assert '"exposure": 0.4' in settings
+assert '"kind": "sky"' in settings
+output.write_bytes(b"rendered")
+""",
+        encoding="utf-8",
+    )
+    cli.chmod(0o755)
+    client = LightCraftClient(cli)
+    client.call_tool("set_develop_settings", {"photo_id": str(source), "settings": {"Exposure2012": 0.4}})
+    client.call_tool("apply_ai_mask", {
+        "photo_id": str(source),
+        "target": "sky",
+        "settings": {"local_Exposure": -0.2, "local_Dehaze": 8},
+    })
+    destination = tmp_path / "out"
+    client.call_tool("export_photos", {
+        "photo_ids": [str(source)],
+        "destination": str(destination),
+        "width": 1600,
+        "height": 1600,
+    })
+    assert (destination / "render.jpg").read_bytes() == b"rendered"
+    document = json.loads((destination / "develop.json").read_text())
+    assert document["light"]["exposure"] == 0.4
+    assert document["masks"][0]["adjust"]["exposure"] == -0.2
+    assert document["masks"][0]["adjust"]["dehaze"] == 8
+    assert "wb" not in document
 
 
 def test_apply_professional_recipe_falls_back_when_preview_handler_is_not_loaded(tmp_path: Path) -> None:
@@ -360,60 +376,31 @@ def test_apply_professional_recipe_falls_back_when_preview_handler_is_not_loaded
     assert Path(result["export"]).read_bytes() == b"jpeg"
 
 
-def test_mcp_client_handshake_and_tool_call(tmp_path: Path) -> None:
-    fake = tmp_path / "fake_mcp.py"
-    fake.write_text(
-        """
-import json, sys
-for line in sys.stdin:
-    msg = json.loads(line)
-    if 'id' not in msg:
-        continue
-    if msg['method'] == 'initialize':
-        result = {'protocolVersion': '2025-06-18', 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'fake', 'version': '1'}}
-    elif msg['method'] == 'tools/list':
-        result = {'tools': [{'name': 'get_selected_photos', 'inputSchema': {'type': 'object'}}]}
-    elif msg['method'] == 'tools/call':
-        result = {'content': [{'type': 'text', 'text': json.dumps({'count': 1, 'photos': [{'id': 'p1'}]})}]}
-    else:
-        result = {}
-    print(json.dumps({'jsonrpc': '2.0', 'id': msg['id'], 'result': result}), flush=True)
-""".strip(),
-        encoding="utf-8",
-    )
-    client = LightroomMcpClient(LightroomRuntime([sys.executable, str(fake)], tmp_path), timeout=2)
-    try:
-        result = client.call_tool("get_selected_photos", {"limit": 1})
-        assert result["count"] == 1
-        assert client.tools == {"get_selected_photos"}
-        with pytest.raises(LightroomError, match="不支持工具"):
-            client.call_tool("set_develop_settings", {})
-    finally:
-        client.close()
+def test_unknown_tool_and_failed_render_are_actionable(tmp_path: Path) -> None:
+    source = tmp_path / "photo.jpg"
+    source.write_bytes(b"source")
+    cli = tmp_path / "lightcraft-cli"
+    cli.write_text("#!/bin/sh\necho 'decoder rejected the file' >&2\nexit 1\n", encoding="utf-8")
+    cli.chmod(0o755)
+    client = LightCraftClient(cli)
+    with pytest.raises(LightroomError, match="不支持工具"):
+        client.call_tool("get_selected_photos")
+    with pytest.raises(LightroomError, match="decoder rejected"):
+        client.call_tool("export_photos", {"photo_ids": [str(source)], "destination": str(tmp_path / "out"), "width": 800})
 
 
-def test_mcp_tool_error_is_user_actionable(tmp_path: Path) -> None:
-    fake = tmp_path / "fake_mcp_error.py"
-    fake.write_text(
-        """
-import json, sys
-for line in sys.stdin:
-    msg = json.loads(line)
-    if 'id' not in msg:
-        continue
-    if msg['method'] == 'initialize':
-        result = {'protocolVersion': '2025-06-18', 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'fake', 'version': '1'}}
-    elif msg['method'] == 'tools/list':
-        result = {'tools': [{'name': 'get_selected_photos', 'inputSchema': {'type': 'object'}}]}
-    else:
-        result = {'content': [{'type': 'text', 'text': 'Lightroom plugin not connected.'}], 'isError': True}
-    print(json.dumps({'jsonrpc': '2.0', 'id': msg['id'], 'result': result}), flush=True)
-""".strip(),
-        encoding="utf-8",
-    )
-    client = LightroomMcpClient(LightroomRuntime([sys.executable, str(fake)], tmp_path), timeout=2)
-    try:
-        with pytest.raises(LightroomError, match="plugin not connected"):
-            client.call_tool("get_selected_photos")
-    finally:
-        client.close()
+def test_custom_white_balance_and_curve_become_lightcraft_settings() -> None:
+    document = adobe_to_lightcraft({
+        "WhiteBalance": "Custom",
+        "Temperature": 5650,
+        "Tint": 4,
+        "ToneCurvePV2012": [0, 0, 128, 140, 255, 255],
+        "PostCropVignetteAmount": -15,
+        "PerspectiveUpright": 4,
+        "LensProfileEnable": True,
+    }, [])
+    assert document["wb"] == {"mode": "custom", "temp": 5650, "tint": 4}
+    assert document["curve"]["master"] == [{"x": 0.0, "y": 0.0}, {"x": 0.501961, "y": 0.54902}, {"x": 1.0, "y": 1.0}]
+    assert document["vignette"]["amount"] == -15
+    assert document["geometry"]["upright"] == "full"
+    assert document["optics"]["lens_profile"] is True

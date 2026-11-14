@@ -42,7 +42,7 @@
 ```sh
 .venv/bin/python -u scripts/replay_lightroom_job.py \
   960ab2c5-f49e-48f7-b977-fe48a4bfadbd \
-  --data '/Users/dextermosby/Library/Application Support/SuperPhoto/data' \
+  --data "$HOME/Library/Application Support/SuperPhoto/data" \
   --redesign
 ```
 

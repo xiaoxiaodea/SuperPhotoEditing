@@ -26,8 +26,8 @@ def main(argv: list[str] | None = None) -> None:
     process.add_argument("--out", type=Path, default=None)
 
     sub.add_parser("install-app", help="install SuperPhoto.app to Applications and Desktop")
-    sub.add_parser("install-lightroom", help="install the bundled Lightroom Classic plugin")
-    sub.add_parser("lightroom-status", help="check the Lightroom Classic MCP connection")
+    sub.add_parser("install-lightcraft", help="download the pinned LightCraft CLI")
+    sub.add_parser("lightcraft-status", help="check that lightcraft-cli can run")
     sub.add_parser("index-masters", help="index Hasselblad Masters for scene-matched grading")
 
     agent = sub.add_parser("agent", help="talk to a running SuperPhoto for the Persona assistant")
@@ -63,11 +63,11 @@ def main(argv: list[str] | None = None) -> None:
 
         path = write_app()
         print(path)
-    elif args.cmd == "install-lightroom":
-        from .lightroom import install_lightroom_plugin
+    elif args.cmd == "install-lightcraft":
+        from .lightcraft import install_cli
 
-        print(json.dumps(install_lightroom_plugin(get_settings().lightroom_mcp_server), ensure_ascii=False, indent=2))
-    elif args.cmd == "lightroom-status":
+        print(json.dumps(install_cli(), ensure_ascii=False, indent=2))
+    elif args.cmd == "lightcraft-status":
         settings = get_settings()
         running = _running_app_lightroom_status(settings.host, settings.port)
         if running is not None:
@@ -75,7 +75,7 @@ def main(argv: list[str] | None = None) -> None:
         else:
             from .lightroom import check_lightroom_connection
 
-            print(json.dumps(check_lightroom_connection(settings.lightroom_mcp_server), ensure_ascii=False, indent=2))
+            print(json.dumps(check_lightroom_connection(settings.lightcraft_bin), ensure_ascii=False, indent=2))
     elif args.cmd == "index-masters":
         from .masters import build_index
 

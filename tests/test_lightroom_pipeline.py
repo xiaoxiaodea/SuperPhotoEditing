@@ -93,7 +93,7 @@ def test_lightroom_renders_baseline_and_three_independent_sources(tmp_path: Path
     assert all(item["score"] == 96.0 for item in summary["slots"].values())
     assert all(item["stage_count"] == 1 for item in summary["slots"].values())
     saved = get_variants(conn, "job-1")
-    assert all("Lightroom 技术检查通过" in row["why"] for row in saved)
+    assert all("LightCraft 技术检查通过" in row["why"] for row in saved)
     assert get_job(conn, "job-1")["step"] == "lightroom"
 
 

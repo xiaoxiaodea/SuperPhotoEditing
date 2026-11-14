@@ -14,15 +14,15 @@ const state = {
 
 const STEP_COPY = {
   queued: "排队",
-  connect: "正在连接 Lightroom，必要时会自动打开",
+  connect: "正在准备 LightCraft",
   ingest: "正在读取底片",
   analyze: "正在做技术分析",
   restore: "正在安全清理画质",
   critique: "正在分析缺陷与读图卡",
   render: "正在选择路线并生成三套配方",
   qa: "正在自检配方",
-  lightroom: "Lightroom 正在调色并检查成片",
-  ready: "Lightroom 成片已完成，可以挑选了",
+  lightroom: "LightCraft 正在调色并检查成片",
+  ready: "LightCraft 成片已完成，可以挑选了",
   error: "处理失败",
 };
 
@@ -71,9 +71,9 @@ function bind() {
     <p class="feedback-hint" id="refine-base"></p>
     <label for="notes">想改哪里？直接说就好</label>
     <textarea id="notes" rows="3" maxlength="1000" placeholder="例如：整体亮一点，保留现在的暖色。或：主体亮一点，背景暗一点。"></textarea>
-    <p class="feedback-hint">Lightroom 会在当前版本上继续调整。完成后可对照微调前后，也可随时切回之前的版本。</p>
+    <p class="feedback-hint">LightCraft 会在当前版本上继续调整。完成后可对照微调前后，也可随时切回之前的版本。</p>
     <div class="judge-actions">
-      <button type="button" class="btn primary" id="refine-submit">让 Lightroom 微调这张</button>
+      <button type="button" class="btn primary" id="refine-submit">让 LightCraft 微调这张</button>
       <button type="button" class="btn ghost" id="again">再来一张</button>
     </div>
     <p id="refine-status" role="status" aria-live="polite"></p>
@@ -198,8 +198,8 @@ async function refreshHealth() {
     else if (semantic.enabled) bits.push("智能分区使用基础模式");
     if (h.darktable_cli) bits.push("darktable-cli 已发现");
     const lr = h.lightroom || {};
-    if (lr.connected) bits.push("Lightroom 已连接");
-    else if (lr.available) bits.push("处理时自动连接 Lightroom");
+    if (lr.connected) bits.push("LightCraft 已就绪");
+    else if (lr.available) bits.push("处理时会调用 LightCraft");
     $("health").textContent = bits.join(" · ");
     $("taste").textContent = h.taste || "";
   } catch {
@@ -485,8 +485,8 @@ function renderRefinementPanel() {
   $("version-download").download = `SuperPhoto-${v.slot}${version ? "-微调" : ""}.jpg`;
   const active = records.find(r => ["queued", "running"].includes(r.status));
   const last = records.at(-1);
-  const copy = {queued: "微调已排队，正在等待 Lightroom", connect: "正在连接 Lightroom", interpret: "正在理解你的微调意见",
-    lightroom: "Lightroom 正在调整并导出", qa: "正在检查微调成片", ready: "微调版已完成，可以对照前后效果", error: "微调未完成"};
+  const copy = {queued: "微调已排队，正在等待 LightCraft", connect: "正在准备 LightCraft", interpret: "正在理解你的微调意见",
+    lightroom: "LightCraft 正在调整并导出", qa: "正在检查微调成片", ready: "微调版已完成，可以对照前后效果", error: "微调未完成"};
   $("refine-status").textContent = active ? (copy[active.step] || "正在微调") : last?.status === "error"
     ? `${last.error || "微调失败"} 调整前版本仍可查看和下载。` : last?.status === "ready" ? copy.ready : "";
   $("refine-history").innerHTML = records.length ? `<details><summary>查看微调记录（${records.length}）</summary><ol>${records.map(r =>
@@ -497,7 +497,7 @@ function renderRefinementPanel() {
 function updateRefinementButton() {
   const active = (state.job?.refinements || []).some(r => r.slot === state.selected && ["queued", "running"].includes(r.status));
   $("refine-submit").disabled = state.refinementPosting || active || $("notes").value.trim().length < 2;
-  $("refine-submit").textContent = active ? "正在微调这张…" : "让 Lightroom 微调这张";
+  $("refine-submit").textContent = active ? "正在微调这张…" : "让 LightCraft 微调这张";
 }
 
 async function submitRefinement() {
@@ -584,7 +584,7 @@ function fail(message) {
   }
   let detail = String(message).split("\n")[0];
   if (detail.includes("Lightroom plugin not connected")) {
-    detail = "Lightroom 尚未连接。请完成 Lightroom 的启动或关闭弹出的对话框，再点“重试这张照片”。";
+    detail = "LightCraft 还不能出片。请运行 install-lightcraft，再点“重试这张照片”。";
   }
   show("error-stage");
   $("error-body").textContent = detail;

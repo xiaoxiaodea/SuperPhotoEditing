@@ -5,7 +5,7 @@ description: 用这台 Mac 上已经打开的 SuperPhoto 修一张照片。用�
 
 # SuperPhoto
 
-SuperPhoto 在本机用 Lightroom 修图。这个技能只调用已经在运行的 SuperPhoto，不要自己启动第二个进程，也不要打开它的窗口去点。
+SuperPhoto 在本机用 LightCraft 修图。这个技能只调用已经在运行的 SuperPhoto，不要自己启动第二个进程，也不要打开它的窗口去点。
 
 命令是这个 skill 里 `scripts/superphoto-agent.sh` 的绝对路径。一条命令只做一件事。不要用 `~`、shell 变量、`;`、`&&` 或换行把几条拼在一起。
 
@@ -17,7 +17,7 @@ SuperPhoto 在本机用 Lightroom 修图。这个技能只调用已经在运行�
 
 1. 先看服务在不在：`sh <脚本绝对路径> status`
    - `running` 不是 true：告诉用户先打开 SuperPhoto，不要改用别的修图办法。
-   - Lightroom 还没连上时可以继续。修图过程会自己去连；失败时 JSON 里会写原因。
+   - LightCraft 还没就绪时可以继续。修图过程会自己调用命令行；失败时 JSON 里会写原因。
 2. 用用户这张照片在这台机器上的绝对路径：`sh <脚本绝对路径> edit <照片绝对路径>`
    - 这一步会等好几分钟。不要同时再交另一张。
    - 超时或中途断开时，JSON 里有 `job_id`。稍后用 `sh <脚本绝对路径> job <job_id>` 再取，不要重新 `edit`。

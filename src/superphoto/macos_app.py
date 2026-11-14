@@ -63,13 +63,12 @@ def _write_bundle(root: Path, dest: Path, icon: Path, python: Path, site: Path, 
     web_dest = resources / "web"
     shutil.copytree(root / "src", src_dest, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     shutil.copytree(root / "web", web_dest, ignore=shutil.ignore_patterns("__pycache__"))
-    vendor_src = root / "vendor" / "lightroom-mcp"
-    if vendor_src.is_dir():
-        shutil.copytree(
-            vendor_src,
-            resources / "vendor" / "lightroom-mcp",
-            ignore=shutil.ignore_patterns("tests", "*.map", ".DS_Store"),
-        )
+    cli_src = root / "vendor" / "lightcraft" / "lightcraft-cli"
+    if cli_src.is_file():
+        cli_dest = resources / "vendor" / "lightcraft" / "lightcraft-cli"
+        cli_dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(cli_src, cli_dest)
+        cli_dest.chmod(cli_dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     for name in ("pyproject.toml", "uv.lock", ".env"):
         src = root / name
         if src.is_file():
@@ -275,6 +274,7 @@ mkdir -p "$HOME/Library/Logs" "{data}"
 
 export SUPERPHOTO_ROOT="$RESOURCES"
 export SUPERPHOTO_DATA_DIR="{data}"
+export SUPERPHOTO_LIGHTCRAFT_BIN="$RESOURCES/vendor/lightcraft/lightcraft-cli"
 {node_export}
 export PYTHONPATH="$RESOURCES/src:{site}"
 export PYTHONDONTWRITEBYTECODE=1

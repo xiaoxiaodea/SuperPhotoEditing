@@ -128,7 +128,7 @@ def health() -> dict[str, Any]:
         critic = "local"
         critic_model = None
     semantic = semantic_status(settings)
-    lr_status = lightroom_status(settings.lightroom_enabled, settings.lightroom_mcp_server)
+    lr_status = lightroom_status(settings.lightroom_enabled, settings.lightcraft_bin)
     return {
         "ok": True,
         "critic": critic,
@@ -148,7 +148,7 @@ def health() -> dict[str, Any]:
 def install_lr_plugin() -> dict[str, Any]:
     settings = _s()
     try:
-        return install_lightroom_plugin(settings.lightroom_mcp_server)
+        return install_lightroom_plugin(settings.lightcraft_bin)
     except LightroomError as exc:
         raise HTTPException(503, str(exc)) from exc
 
@@ -157,9 +157,9 @@ def install_lr_plugin() -> dict[str, Any]:
 def connect_lr() -> dict[str, Any]:
     settings = _s()
     if not settings.lightroom_enabled:
-        raise HTTPException(409, "当前未启用 Lightroom 后期")
+        raise HTTPException(409, "当前未启用 LightCraft 后期")
     try:
-        _client, status = connect_lightroom(settings.lightroom_mcp_server)
+        _client, status = connect_lightroom(settings.lightcraft_bin)
         return status
     except LightroomError as exc:
         raise HTTPException(503, str(exc)) from exc
@@ -348,7 +348,7 @@ def create_refinement(job_id: str, body: RefinementIn, background: BackgroundTas
                 raise HTTPException(409, "这条微调请求已用于其他内容，请重新提交")
             return _public_refinement(existing)
         if not settings.lightroom_enabled:
-            raise HTTPException(409, "需要启用 Lightroom 才能进行二次调整")
+            raise HTTPException(409, "需要启用 LightCraft 才能进行二次调整")
         try:
             refinement_base(settings, conn, job_id, body.slot, parent_id)
         except (ValueError, KeyError) as exc:

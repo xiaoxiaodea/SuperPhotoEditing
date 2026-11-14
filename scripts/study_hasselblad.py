@@ -164,7 +164,7 @@ def write_json(path: Path, data: dict | list) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", type=Path, default=Path("/Users/dextermosby/Downloads/ph-main/hasselblad"))
+    parser.add_argument("--source", type=Path, default=Path.home() / "Downloads/ph-main/hasselblad")
     parser.add_argument("--legacy", type=Path, default=Path("data/references/awards/hasselblad_masters"))
     parser.add_argument("--out", type=Path, default=Path("data/references/hasselblad-study"))
     parser.add_argument("--inventory-only", action="store_true")

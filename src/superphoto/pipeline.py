@@ -350,7 +350,7 @@ def _adaptation_notes(recipe: Recipe, technical) -> list[str]:
 
 
 def _connected_lightroom(settings: Settings):
-    return connect_lightroom(settings.lightroom_mcp_server)
+    return connect_lightroom(settings.lightcraft_bin)
 
 
 def _prepare_lightroom_baseline(settings: Settings, original: Path, root: Path) -> dict:
@@ -404,7 +404,7 @@ def _render_variants_with_lightroom(
     baseline_dir = root / "lightroom-exports" / "baseline"
     if baseline_result is None:
         if baseline_dir.exists():
-            raise LightroomError(f"Lightroom 基线输出目录已存在：{baseline_dir}")
+            raise LightroomError(f"LightCraft 基线输出目录已存在：{baseline_dir}")
         shutil.copy2(original, baseline_copy)
         baseline_result = export_lightroom_baseline(client, original=baseline_copy,
             output_dir=baseline_dir, export_edge=settings.lightroom_export_edge)
@@ -483,7 +483,7 @@ def _render_variants_with_lightroom(
         for attempt in range(total_rounds):
             export_dir = root / "lightroom-exports" / slot / f"round-{attempt}"
             if export_dir.exists():
-                raise LightroomError(f"Lightroom 候选输出目录已存在：{export_dir}")
+                raise LightroomError(f"LightCraft 候选输出目录已存在：{export_dir}")
             try:
                 pass_result = apply_recipe_pass(
                     client,
@@ -564,7 +564,7 @@ def _render_variants_with_lightroom(
             visual_review = VisualReview(decision="same", confidence=1.0, source="retained-baseline",
                                          notes=["复核未发现可靠改善，交付保留的自然基线"])
             row["title"] = "保留自然基线"
-            row["why"] = "当前调整未改善画面，保留 Lightroom 自然基线。"
+            row["why"] = "当前调整未改善画面，保留 LightCraft 自然基线。"
 
         replaced = False
         if accepted_export is None and (preset_mode or (slot != "A" and safe_recipe is not None)) and render_error is None:
@@ -804,7 +804,7 @@ def _render_variants_with_lightroom(
         }
         sidecar_payload["candidate_selection"] = selection
         row["recipe_json"] = json.dumps(sidecar_payload, ensure_ascii=False)
-        quality_mark = "Lightroom 技术检查通过"
+        quality_mark = "LightCraft 技术检查通过"
         row["why"] = f"{str(row.get('why') or '').rstrip()} {quality_mark}。".strip()
         if not selection["distinct"]:
             row["why"] += " 与其他方案的差别较细微。"
