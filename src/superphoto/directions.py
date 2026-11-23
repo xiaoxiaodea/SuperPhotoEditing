@@ -10,7 +10,7 @@ import numpy as np
 from .config import Settings
 from .models import ArtDirection, ColorGradingControls, Critique, HueShift, MaskAdjustment, Recipe, TechnicalReport, ToneCurve
 from .finishing_knowledge import METHODS, finishing_context, method_ids, method_recipe, retain_palette_design
-from .ollama import chat_vision, probe
+from .vision import chat_vision, probe, provider_from, safe_error
 
 
 def scene_directions(critique: Critique, technical: TechnicalReport, *, methods=None) -> list[ArtDirection]:
@@ -137,7 +137,12 @@ def bound_direction(direction: ArtDirection, critique: Critique, technical: Tech
         data["contrast"] = min(0.0, data["contrast"])
         data["curve"]["rgb"] = [(x, max(x, y) if x <= .5 else y) for x, y in data["curve"]["rgb"]]
     from .master_studies import apply_study_guards
-    return direction.model_copy(update={"recipe": apply_study_guards(Recipe.model_validate(data), critique, technical)})
+    from .resource_knowledge import apply_resource_guards
+    adjustments = []
+    recipe = apply_study_guards(Recipe.model_validate(data), critique, technical)
+    recipe = apply_resource_guards(recipe, critique, technical, audit=adjustments)
+    return direction.model_copy(update={"recipe": recipe,
+        "resource_adjustments": direction.resource_adjustments + adjustments})
 
 
 def _signature(recipe: Recipe, *, full: bool = False) -> np.ndarray:
@@ -159,7 +164,9 @@ def _signature(recipe: Recipe, *, full: bool = False) -> np.ndarray:
     local = [getattr(masks[target], control) * weight if target in masks else 0
              for target in ("subject", "sky", "background")
              for control, weight in (("exposure_ev", .25), ("contrast", .5), ("whites", .5), ("blacks", .5))]
-    signature = np.r_[tone * 2, palette, hsl, local, recipe.saturation * .6]
+    # Recovery remains visible with an identity curve and disabled palette.
+    recovery = [recipe.highlights, recipe.shadows, recipe.whites, recipe.blacks]
+    signature = np.r_[tone * 2, palette, hsl, local, recipe.saturation * .6, recovery]
     if full:
         channels = [np.interp(xs, *np.array(getattr(recipe.curve, name) or [(0, 0), (1, 1)]).T) - xs
                     for name in ("r", "g", "b")]
@@ -172,6 +179,21 @@ def _signature(recipe: Recipe, *, full: bool = False) -> np.ndarray:
 def _signature_distance(first: np.ndarray, second: np.ndarray) -> float:
     # A localized light/palette change should not be diluted by unused controls.
     return float(np.sqrt(np.mean((first - second) ** 2)))
+
+
+def _retain_disabled_controls(recipe: Recipe, overrides: dict) -> Recipe:
+    """Keep explicit numeric zeros when a fallback supplies the other controls."""
+    data = recipe.model_dump()
+
+    def retain(target, requested):
+        for key, value in requested.items():
+            if isinstance(value, dict):
+                retain(target.setdefault(key, {}), value)
+            elif isinstance(value, (int, float)) and value == 0:
+                target[key] = value
+
+    retain(data, overrides)
+    return Recipe.model_validate(data)
 
 
 def _response_schema(*, preset: bool = False) -> dict:
@@ -204,6 +226,7 @@ def design_directions(settings: Settings, preview: Path, critique: Critique, tec
                 if look_ids else scene_directions(critique, technical, methods=methods))
     by_slot = {d.slot: d for d in defaults}
     proposed = {}
+    explicit_recipes = {}
     knowledge = finishing_context(critique, technical, methods=methods)
     if look_ids:
         from .recipes import get_look
@@ -215,6 +238,9 @@ def design_directions(settings: Settings, preview: Path, critique: Critique, tec
     audit = {"model_response": None, "issues": [], "selected": [], "knowledge": knowledge,
              "preset_ids": look_ids or [], "starting_directions": [d.model_dump() for d in defaults]}
     status = probe(settings)
+    transport_audit: dict = {}
+    audit["vision_status"] = status
+    audit["transport_audit"] = transport_audit
     if status.get("ready"):
         prompt = f"""Design THREE distinct professional photographic finishes for THIS photo.
 Scene: {critique.subject_note}. Intent: {critique.intent.goal}.
@@ -299,7 +325,8 @@ Example of ONE recipe (design three different curves, do not copy this):
                 prompt += "\nSlots are three image-matched presets, NOT fixed brightness roles. Keep preset identity; adapt strength, light and competing colors to THIS image. Describe only the changes you actually make.\n"
             audit["prompt"] = prompt
             raw = chat_vision(settings, status["resolved_model"], prompt, base64.b64encode(preview.read_bytes()).decode("ascii"),
-                              response_schema=_response_schema(preset=bool(look_ids)))
+                              response_schema=_response_schema(preset=bool(look_ids)),
+                              audit=transport_audit, selection=status)
             audit["model_response"] = raw
             data = _extract_json(raw)
             items = data.get("directions", data)
@@ -313,7 +340,8 @@ Example of ONE recipe (design three different curves, do not copy this):
                     # palette design that the text promises to the user.
                     default = by_slot[item["slot"]]
                     starting = default.recipe.model_dump() if look_ids else method_recipe(method).model_dump()
-                    for key, value in item.get("recipe", {}).items():
+                    overrides = item.get("recipe", {})
+                    for key, value in overrides.items():
                         if key == "hsl" and isinstance(value, dict):
                             for color, controls in value.items():
                                 starting["hsl"].setdefault(color, {}).update(controls)
@@ -326,7 +354,7 @@ Example of ONE recipe (design three different curves, do not copy this):
                     if look_ids:
                         item["title"] = default.title
                     direction = ArtDirection.model_validate(item)
-                    direction.source = "ollama"
+                    direction.source = provider_from(status, transport_audit)
                     direction = bound_direction(direction, critique, technical)
                     if method == "natural" and direction.recipe.curve.rgb:
                         midpoint = float(np.interp(.5, *np.array(direction.recipe.curve.rgb).T))
@@ -351,11 +379,14 @@ Example of ONE recipe (design three different curves, do not copy this):
                         masks["subject"] = focal
                         direction.recipe.masks = list(masks.values())
                     proposed[direction.slot] = direction
+                    explicit_recipes[direction.slot] = overrides
                 except (ValueError, TypeError, KeyError) as exc:
-                    audit["issues"].append(str(exc))
+                    audit["issues"].append(type(exc).__name__)
                     continue
         except Exception as exc:
-            audit["issues"].append(f"{type(exc).__name__}: {exc}")
+            audit["issues"].append(safe_error(exc))
+    if not status.get("ready"):
+        audit["issues"].append("视觉模型不可用，使用本地场景方向")
     result = []
     identity = _signature(Recipe())
     for default in defaults:
@@ -370,8 +401,15 @@ Example of ONE recipe (design three different curves, do not copy this):
         if _signature_distance(signature, identity) < .012 or any(
                 _signature_distance(signature, _signature(previous.recipe)) < .018 for previous in result):
             audit["issues"].append(f"{default.slot}: near identity or duplicate; used scene direction")
-            candidate = default
-        result.append(bound_direction(candidate, critique, technical))
+            candidate = default.model_copy(update={"recipe": _retain_disabled_controls(
+                default.recipe, explicit_recipes.get(default.slot, {}))})
+        selected = bound_direction(candidate, critique, technical)
+        selected.vision_provider = provider_from(status, transport_audit) if candidate.source != "scene" else "local"
+        selected.transport_audit = {"provider": selected.vision_provider, "transport": transport_audit,
+                                    "issues": list(audit["issues"]),
+                                    "fallback": bool(transport_audit.get("fallback")) or
+                                                (selected.vision_provider == "local" and settings.vision_provider != "local")}
+        result.append(selected)
     if audit_path is not None:
         audit["selected"] = [d.model_dump() for d in result]
         audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")

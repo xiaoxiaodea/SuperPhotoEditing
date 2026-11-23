@@ -26,7 +26,7 @@ def main():
     for slot in "ABC":
         if slot not in titles:
             continue
-        audit = json.loads((root / f"lightroom-audits/variant_{slot}.json").read_text())
+        audit = json.loads((root / f"lightroom-audits/variant_{slot}.json").read_text(encoding="utf-8"))
         exported = root / f"variant_{slot}.jpg"
         if exported.read_bytes() != Path(audit["accepted_export"]).read_bytes():
             raise ValueError(f"{slot} does not match its accepted Lightroom export")

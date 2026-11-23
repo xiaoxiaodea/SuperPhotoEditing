@@ -185,7 +185,7 @@ def test_dark_source_separation_preserves_palette_and_shadow_anchors():
                                         technical=_tech(mean_luma=.08, shadow_clip=.22, aqua_fraction=.27))
     assert changed.exposure_ev == base.exposure_ev
     assert changed.curve.rgb[0] == base.curve.rgb[0] and changed.curve.rgb[1] == base.curve.rgb[1]
-    assert changed.curve.rgb[2][1] > base.curve.rgb[2][1]
+    assert np.interp(.5, *np.array(changed.curve.rgb).T) > np.interp(.5, *np.array(base.curve.rgb).T)
     assert changed.masks == base.masks
     assert changed.hsl == base.hsl and changed.color_grading == base.color_grading
 

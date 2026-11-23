@@ -134,7 +134,7 @@ def test_complete_wb_readback_reaches_the_native_apply_and_saved_audit(tmp_path:
     )
     assert client.settings == {"WhiteBalance": "Custom", "Temperature": 5972.5, "Tint": 18}
     assert result["effective_recipe"]["temperature"] == 0.5
-    assert json.loads(audit_path.read_text())["white_balance"][0]["base"]["Temperature"] == 5950
+    assert json.loads(audit_path.read_text(encoding="utf-8"))["white_balance"][0]["base"]["Temperature"] == 5950
 
 
 def test_native_white_balance_readback_guards() -> None:

@@ -15,9 +15,9 @@ from study_hasselblad import write_json
 
 
 def collect(folder):
-    inventory = json.loads((folder / "inventory.json").read_text())
+    inventory = json.loads((folder / "inventory.json").read_text(encoding="utf-8"))
     review_path = folder / "visual-review.json"
-    reviewed = json.loads(review_path.read_text()) if review_path.is_file() else {}
+    reviewed = json.loads(review_path.read_text(encoding="utf-8")) if review_path.is_file() else {}
     records, pending, invalid = [], [], []
     for source in inventory:
         path = folder / "records" / (source["id"] + ".json")
@@ -25,7 +25,7 @@ def collect(folder):
             pending.append(source)
             continue
         try:
-            record = json.loads(path.read_text())
+            record = json.loads(path.read_text(encoding="utf-8"))
             if record.get("schema_version") != 3 or record.get("status") != "complete" or record["sha256"] != source["sha256"]:
                 pending.append(source)
                 continue

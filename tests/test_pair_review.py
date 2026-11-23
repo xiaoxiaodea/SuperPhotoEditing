@@ -41,7 +41,7 @@ def vision(monkeypatch):
     def install(answers):
         replies = iter(answers)
 
-        def chat(settings, model, prompt, images, *, response_schema, audit):
+        def chat(settings, model, prompt, images, *, response_schema, audit, selection=None):
             assert len(images) == 1
             binary = base64.b64decode(images[0])
             with Image.open(BytesIO(binary)) as board:

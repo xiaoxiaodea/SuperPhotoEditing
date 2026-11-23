@@ -18,7 +18,7 @@ from .config import Settings
 from .critique import _extract_json
 from .ingest import image_to_srgb, srgb_profile_bytes
 from .models import EditIntent
-from .ollama import chat_vision, probe
+from .vision import chat_vision, probe, provider_from, safe_error
 from .review import _preview
 
 
@@ -90,6 +90,7 @@ class PairJudgment(BaseModel):
     notes: list[str] = Field(default_factory=list)
     orders: list[PairOrder] = Field(default_factory=list)
     source: str = "unavailable"
+    vision_status: dict = Field(default_factory=dict)
 
 
 def _file_hash(path: Path) -> str:
@@ -184,6 +185,7 @@ def compare_finished_pair(settings: Settings, first: Path, second: Path, intent:
             return judgment.model_copy(update={"outcome": "tie", "confidence": 1.0,
                 "source": "identical-render", "notes": ["评审预览相同，无法据此区分优劣"]})
         status = probe(settings)
+        judgment.vision_status = status
         if not status.get("ready") or not status.get("resolved_model"):
             judgment.notes = ["视觉模型不可用，未确定成片优劣"]
             return judgment
@@ -198,14 +200,15 @@ def compare_finished_pair(settings: Settings, first: Path, second: Path, intent:
                 board = build_pair_board(previews[indices[0]], previews[indices[1]], reference_preview)
                 order.board_sha256 = hashlib.sha256(_preview_bytes(board)).hexdigest()
                 order.raw_response = chat_vision(settings, status["resolved_model"], prompt, [board],
-                    response_schema=answer_type.model_json_schema(), audit=order.transport_audit)
+                    response_schema=answer_type.model_json_schema(), audit=order.transport_audit, selection=status)
                 response = answer_type.model_validate(_extract_json(order.raw_response))
                 order.choice, order.confidence, order.evidence = response.choice, response.confidence, response.evidence
             except Exception as exc:
-                order.error = f"{type(exc).__name__}: {exc}"
+                order.error = safe_error(exc)
                 judgment.notes = ["至少一个呈现顺序的比较不可用，未确定成片优劣"]
                 return judgment
-        judgment.source = "ollama-pair"
+        providers = {provider_from(status, order.transport_audit) for order in judgment.orders}
+        judgment.source = f"{next(iter(providers))}-pair" if len(providers) == 1 else "mixed-pair"
         reliable = all(order.confidence >= .75 for order in judgment.orders)
         if reliable and all(order.choice == "tie" for order in judgment.orders):
             judgment.outcome = "tie"

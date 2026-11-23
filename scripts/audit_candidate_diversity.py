@@ -21,7 +21,7 @@ from superphoto.lightroom_qa import _content_masks, _read_pixels, _rgb_to_lab
 def audit_job(root: Path) -> dict:
     baseline = _read_pixels(root / "lightroom-exports/baseline/baseline.jpg")
     size = (baseline.rgb.shape[1], baseline.rgb.shape[0])
-    audits = {slot: json.loads((root / "lightroom-audits" / f"variant_{slot}.json").read_text())
+    audits = {slot: json.loads((root / "lightroom-audits" / f"variant_{slot}.json").read_text(encoding="utf-8"))
               for slot in "ABC" if (root / "lightroom-audits" / f"variant_{slot}.json").is_file()}
     delivered = {slot: audit for slot, audit in audits.items() if audit.get("accepted_export")}
     images = {slot: _rgb_to_lab(_read_pixels(root / f"variant_{slot}.jpg", size=size).rgb)

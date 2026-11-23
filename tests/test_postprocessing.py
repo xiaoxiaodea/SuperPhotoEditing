@@ -292,7 +292,7 @@ def test_pairwise_review_uses_one_numbered_board_and_bounds_corrections(tmp_path
     Image.new("RGB", (24, 24), (100, 90, 80)).save(after)
     monkeypatch.setattr("superphoto.review.probe", lambda _: {"ready": True, "resolved_model": "vision"})
     calls = []
-    def vision(settings, model, prompt, images, *, audit):
+    def vision(settings, model, prompt, images, *, audit, selection=None):
         assert len(images) == 1
         with Image.open(BytesIO(base64.b64decode(images[0]))) as board:
             left = board.getpixel((board.width // 4, board.height // 2))
@@ -338,7 +338,7 @@ def test_unconfirmed_damage_retains_opinion_without_rollback(tmp_path, monkeypat
     Image.new("RGB", (24, 24), (85, 92, 100)).save(after)
     monkeypatch.setattr("superphoto.review.probe", lambda _: {"ready": True, "resolved_model": "vision"})
     responses = iter(['{"decision":"worse","confidence":0.9,"damage":[{"kind":"detail_loss","region":"水面","evidence":"反光变弱","severity":0.8}]}', verification])
-    def vision(*args, audit):
+    def vision(*args, audit, selection=None):
         raw = next(responses)
         audit["response"] = {"message": {"content": raw}}
         return raw
@@ -368,7 +368,7 @@ def test_false_preserved_color_does_not_anchor_verification(tmp_path, monkeypatc
         calls.append((first, second))
         return f"mock-board-{len(calls)}"
     monkeypatch.setattr("superphoto.pair_review.build_pair_board", board)
-    def vision(settings, model, prompt, images, *, audit):
+    def vision(settings, model, prompt, images, *, audit, selection=None):
         assert images == [f"mock-board-{len(calls)}"]
         if len(calls) == 1:
             return '{"decision":"worse","confidence":0.9,"damage":[{"kind":"color_cast","region":"水面","evidence":"反光从冷变暖","severity":0.7}]}'
@@ -388,7 +388,7 @@ def test_review_keeps_transport_failure_audit_without_authorizing_rollback(tmp_p
     monkeypatch.setattr("superphoto.pair_review.build_pair_board", lambda first, second: "mock-board")
     calls = []
     failure = {"done": False, "message": {"content": '{"confirmed":true}'}}
-    def vision(settings, model, prompt, images, *, audit):
+    def vision(settings, model, prompt, images, *, audit, selection=None):
         calls.append(images)
         if len(calls) == failure_call:
             audit.update(response=failure, error={"type": "ValueError"})

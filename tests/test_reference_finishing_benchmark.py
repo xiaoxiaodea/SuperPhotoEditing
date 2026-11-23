@@ -124,14 +124,14 @@ def test_reference_round_two_failure_retains_first_effective_native_result(exper
     monkeypatch.setattr(experiment, "apply_recipe_pass", render)
     monkeypatch.setattr(experiment, "assess_lightroom_render", quality)
     experiment.main()
-    audit = json.loads((out / "audit.json").read_text())
+    audit = json.loads((out / "audit.json").read_text(encoding="utf-8"))
     assert audit["planner"] == "reference-guided-model" and not audit["reference_free_automatic"]
     assert [record["selected"] for record in audit["rounds"]] == [True, False]
     accepted = Path(audit["accepted_export"])
     assert accepted.parent.parent.name == "round-0"
     assert (out / "final.jpg").read_bytes() == accepted.read_bytes()
     assert audit["accepted_recipe"]["contrast"] == pytest.approx(.18)
-    assert json.loads(accepted.read_text()) == audit["accepted_recipe"]
+    assert json.loads(accepted.read_text(encoding="utf-8")) == audit["accepted_recipe"]
     assert audit["rounds"][1]["retained_recipe"]["contrast"] == pytest.approx(.18)
     assert len(vision_calls) == 2 and vision_calls == ["Ym9hcmQ=", "Ym9hcmQ="]
     assert len(pair_calls) == 1 and pair_calls[0][2]

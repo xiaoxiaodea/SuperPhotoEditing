@@ -23,7 +23,7 @@ def main():
     parser.add_argument("recipe", type=Path)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
-    payload = json.loads(args.recipe.read_text())
+    payload = json.loads(args.recipe.read_text(encoding="utf-8"))
     recipe = Recipe.model_validate(payload["recipe"])
     root = (args.out / uuid4().hex[:8]).resolve()
     root.mkdir(parents=True)

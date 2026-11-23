@@ -1,0 +1,1154 @@
+{
+  "schema_version": 1,
+  "reviewed_on": "2026-11-13",
+  "scope": "reviewed principles and our conservative executable interpretations; not original author recipes or trained weights",
+  "coverage": {
+    "files": 128,
+    "file_types": {
+      ".dng": 34,
+      ".xmp": 23,
+      ".zip": 26,
+      ".jpg": 24,
+      ".png": 5,
+      ".mp4": 16
+    },
+    "xmp_entries": 401,
+    "unique_xmp_bytes": 379,
+    "unique_setting_signatures": 341,
+    "duplicate_xmp_entries": 22,
+    "roles": {
+      "look": 298,
+      "instructions": 15,
+      "baseline": 9,
+      "reset": 2,
+      "grading": 32,
+      "grain": 7,
+      "mask": 16
+    },
+    "auto_registered": false,
+    "video_frames_sampled": 432,
+    "video_audio_transcribed": false
+  },
+  "sources": {
+    "2026-05-08": {
+      "path": "LeoCarbin视频教程\\2026-05-08_《名人仿色》轻松学会森系调色大法， Michael Kagerer仿色教程，Lightroom保姆级教程，拆解调色原理（附送调色素材）.mp4",
+      "sha256": "e10ac1182cb67edd9f5f093235c5a36e42692496eb0bb2baab618345d0e0bdb6",
+      "kind": "video_sampled_frames",
+      "duration_seconds": 965.39,
+      "audio_transcribed": false
+    },
+    "2026-05-14": {
+      "path": "LeoCarbin视频教程\\2026-05-14_《名人仿色》低饱暗系大法，这个色调学会就是大师， 品川力仿色教程，沉浸式Lightroom保姆级教程，拆解调色原理（附送调色素材）.mp4",
+      "sha256": "4894136eafa1b2230384764ae4bf57958b680a42b62de5a5b6c6421d74bd6db3",
+      "kind": "video_sampled_frames",
+      "duration_seconds": 536.87,
+      "audio_transcribed": false
+    },
+    "2026-05-21": {
+      "path": "LeoCarbin视频教程\\2026-05-21_《名人仿色》日系胶片大法，学会就是胶片大师， 滨田英明仿色教程，沉浸式Lightroom保姆级教程，拆解调色原理（附送调色素材）.mp4",
+      "sha256": "51c232044f3c3cc6df566ab9015239e5fb3312b618fb154a3a8b911de9e3038e",
+      "kind": "video_sampled_frames",
+      "duration_seconds": 663.46,
+      "audio_transcribed": false
+    },
+    "2026-05-30": {
+      "path": "LeoCarbin视频教程\\2026-05-30_《名人仿色》全能调色大法，学会这个色调一定能出片，Tim Northey仿色教程，沉浸式Lightroom保姆级教程，拆解调色原理（附送调色.mp4",
+      "sha256": "fbcf9bcf36ff0f9b286a6ae7ba34fe72b9e59bb1e4e5b9c2fc1ca972587bbfa1",
+      "kind": "video_sampled_frames",
+      "duration_seconds": 579.9,
+      "audio_transcribed": false
+    },
+    "2026-06-21": {
+      "path": "LeoCarbin视频教程\\2026-06-21_《名人仿色》暮色梦境大法，学会这个色调就是情绪大师，KIRINOMA仿色教程，沉浸式Lightroom保姆级教程，拆解调色原理（附送调色素材.mp4",
+      "sha256": "db80a06313cce5d2e59a5887f1795ac396fa566b64893307c47284d73975b334",
+      "kind": "video_sampled_frames",
+      "duration_seconds": 640.31,
+      "audio_transcribed": false
+    },
+    "2026-07-03": {
+      "path": "LeoCarbin视频教程\\2026-07-03_新手如何快速调出质感大片，快速入门后期调色，沉浸式Luminar Neo保姆级教程.mp4",
+      "sha256": "6991e3e2dad52761f16f2efe9a5e3a52391f35e110947b55c7513b62cdf281dd",
+      "kind": "video_sampled_frames",
+      "duration_seconds": 455.85,
+      "audio_transcribed": false
+    },
+    "2026-07-10": {
+      "path": "LeoCarbin视频教程\\2026-07-10_极致去雾大法，学会这个调色技法从此没有废片，沉浸式Lightroom保姆级教程（附送调色素材）.mp4",
+      "sha256": "a3231fe1cfdba9a5b9a9c7152496a88831c9a11091657f041d453a3475947215",
+      "kind": "video_sampled_frames",
+      "duration_seconds": 310.73,
+      "audio_transcribed": false
+    },
+    "2026-07-18": {
+      "path": "LeoCarbin视频教程\\2026-07-18_废片拯救大法，手机就能轻松调色出片，学会这个调色技法肯定能出片，沉浸式Lightroom保姆级教程，拆解调色原理（附送预设）.mp4",
+      "sha256": "d9b5d0ba38ddff4eed4f33423c7bf6fdf1578170a83db0fe206244525873febc",
+      "kind": "video_sampled_frames",
+      "duration_seconds": 378.83,
+      "audio_transcribed": false
+    },
+    "2026-08-23": {
+      "path": "LeoCarbin视频教程\\2026-08-23_《名人仿色》德系复古质感调色，学会它照片质感瞬间拉满， Maurice Pehle仿色教程，沉浸式Lightroom保姆级教程，拆解调色原理.mp4",
+      "sha256": "6ec7bb69dc39f9f4018ee1b9c3c5f4951d725495234c252bdbb118f2d9052f70",
+      "kind": "video_sampled_frames",
+      "duration_seconds": 599.4,
+      "audio_transcribed": false
+    },
+    "2026-09-02": {
+      "path": "LeoCarbin视频教程\\2026-09-02_调色必须学会看懂直方图，教你快速并有效理解直方图原理.mp4",
+      "sha256": "dbf7584766239bef8104e09849035f91eb2a49e00cae4dba8b1fccc4872c5b51",
+      "kind": "video_sampled_frames",
+      "duration_seconds": 133.14,
+      "audio_transcribed": false
+    },
+    "2026-09-05": {
+      "path": "LeoCarbin视频教程\\2026-09-05_学会了用不同的色调氛围，LeoCarbin预设效果展示，在手机就可以调色出片.mp4",
+      "sha256": "3d70f17aa3fdb23ec1f6afb08264e77e5713fd08ca65b9c68e162eae7f8efa2c",
+      "kind": "video_sampled_frames",
+      "duration_seconds": 35.69,
+      "audio_transcribed": false
+    },
+    "2026-09-15": {
+      "path": "LeoCarbin视频教程\\2026-09-15_Lr预设使用，看一遍就懂了，手机平板电脑都可以使用~.mp4",
+      "sha256": "66746cb63f907d8e63432169055dd36ca38088f69a4ca32d0f9d4e8bccdc2b17",
+      "kind": "video_sampled_frames",
+      "duration_seconds": 108.37,
+      "audio_transcribed": false
+    },
+    "2026-09-17": {
+      "path": "LeoCarbin视频教程\\2026-09-17_靠这组预设成为了十万粉博主，LeoCarbin的原创预设合集效果演示，预设使用让照片瞬间提升质感~.mp4",
+      "sha256": "e623fe3dd81cec8618ef0c37b30e07129c31f24ad729955290a3e6cb4dbcaac2",
+      "kind": "video_sampled_frames",
+      "duration_seconds": 233.38,
+      "audio_transcribed": false
+    },
+    "2026-10-19": {
+      "path": "LeoCarbin视频教程\\2026-10-19_《名人仿色》高级灰调哑光质感调色，非常全能的色调影调搭配，Shortstache仿色教程，沉浸式Lightroom保姆级教程，拆解调色原理（.mp4",
+      "sha256": "354ae12bfd67c75dc5389ac24c496ef9f58ce55d1c62819937e06675db61d166",
+      "kind": "video_sampled_frames",
+      "duration_seconds": 470.71,
+      "audio_transcribed": false
+    },
+    "2026-11-06": {
+      "path": "LeoCarbin视频教程\\2026-11-06_夜景后期全靠这组预设，LeoCarbin的原创预设合集效果演示，预设使用让照片瞬间提升质感~.mp4",
+      "sha256": "86127c96ad88d5da637cfbd69095ea84c67ad44c7c21593bbc18da6b802066f6",
+      "kind": "video_sampled_frames",
+      "duration_seconds": 30.0,
+      "audio_transcribed": false
+    },
+    "2026-11-12": {
+      "path": "LeoCarbin视频教程\\2026-11-12_全能的氛围感调色技法，学会它高级的氛围感拉满了，沉浸式Lightroom保姆级教程（附送调色素材）.mp4",
+      "sha256": "7f5b6e7b6b54bc86841b6d1ddaf9ee9d808252399c739334ea8e62bd3d63196e",
+      "kind": "video_sampled_frames",
+      "duration_seconds": 287.06,
+      "audio_transcribed": false
+    },
+    "preset-snow": {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/XMP文件/#LC - Snow V1.xmp",
+      "sha256": "30b29440415b90de1031267bf0101a9b63710dddacda1606947a1ba7ba2a9a25",
+      "kind": "xmp_structure",
+      "role": "look"
+    },
+    "preset-cine": {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/XMP文件/#LC - CINE V1.xmp",
+      "sha256": "8814541cc2151e116f71e8efd37364b8ae9ac6035ba2c9818cf0d386d8269907",
+      "kind": "xmp_structure",
+      "role": "look"
+    },
+    "preset-period": {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 古风电影/XMP文件/#LC - 柔润古风V1.xmp",
+      "sha256": "f6582cac8ce27100176a7f0446ba85037628c960a5a3e932b9790b129eb85f4c",
+      "kind": "xmp_structure",
+      "role": "look"
+    },
+    "preset-fog": {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/2-#LeoCarbin - 原创风格 - 迷雾.zip!1 - 迷雾基调预设（先用此预设调整到正常亮度，再尝试其它色感预设）.xmp",
+      "sha256": "70ff09e8b2f1d72140da363d7e29cb01c440bc24c2258e7cdef72d59879ac00a",
+      "kind": "xmp_structure",
+      "role": "baseline"
+    },
+    "preset-grading": {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/12-#LC - 色调氛围 - 颜色分级.zip!0 - 清除颜色分级.xmp",
+      "sha256": "0cbc76abbed21c89669c3761a99d9e6e8639246103be433d178d3909cc147bde",
+      "kind": "xmp_structure",
+      "role": "reset"
+    },
+    "preset-grain": {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/13-#LC - 胶片颗粒.zip!0 - 清除颗粒.xmp",
+      "sha256": "5647c381fdd03d897ffce156011b141d14b1bc06c3efa0c838e85ab662b285c4",
+      "kind": "xmp_structure",
+      "role": "reset"
+    },
+    "preset-mask": {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/14-#LC - 蒙版.zip!1 - 下方暗.xmp",
+      "sha256": "e92c18b6b69bb9638de5adcf0bf993f5c062e3fc838f2e800f04f981bed7c18a",
+      "kind": "xmp_structure",
+      "role": "mask"
+    },
+    "preset-forest": {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Michael Kagerer预设大全 - 付费版/#LC - Michael Kagerer - 森系氛围.zip!#说明：先用“基础预设”调整亮度参数，再选其它色感；.xmp",
+      "sha256": "ab8b0daebb203ae172553a171da75da8c2c933e55962def1878eb5a70f2b7d84",
+      "kind": "xmp_structure",
+      "role": "instructions"
+    },
+    "preset-portrait": {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/7-#LeoCarbin - 原创风格 - 人像.zip!1 - 基调预设（先用此预设调整到正常亮度，再尝试其它色感预设）.xmp",
+      "sha256": "db2d92bde53550dadd7e49892814ca08379266e66dc0193eb89591057aec7f09",
+      "kind": "xmp_structure",
+      "role": "baseline"
+    },
+    "preset-workflow": {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/#LeoCarbin - 原创风格-车间.xmp",
+      "sha256": "fd44ad799e277bc9092e04c53445e9cd0be481e78d104917d96b1426bd2ed43e",
+      "kind": "xmp_structure",
+      "role": "look"
+    }
+  },
+  "source_manifest": [
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/DNG图片/#L&C-CINE-1.dng",
+      "bytes": 731350,
+      "sha256": "657324f0bd45349c012c1eb861ef345f7f4007416c1a3f78c028a655a25cc2e2"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/DNG图片/#L&C-CINE-2.dng",
+      "bytes": 732214,
+      "sha256": "04e8875e9af8c545c3f735cf6cafa2baebd095a68205152f894a77c18f2318d5"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/DNG图片/#L&C-CINE-3.dng",
+      "bytes": 721634,
+      "sha256": "8717569ad66085e5a205ec17721a2fb4464d8de02a89fae90a8e976e565a289d"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/DNG图片/#L&C-CINE-4.dng",
+      "bytes": 734416,
+      "sha256": "2568e9688121bc89c5ec526dcff66e21aa62e3cfdc44780ce0d7cd4cc5121951"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/DNG图片/#L&C-CINE-5.dng",
+      "bytes": 731914,
+      "sha256": "0e4a6ebe91ed9218ba6af109a18d90f595fbda35afcc47ce1b7e808b430fbb20"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/DNG图片/#L&C-CINE-6.dng",
+      "bytes": 733982,
+      "sha256": "a59a9ad4110145b5069f671496871f9327114edf93781b3f6a433ae1d41f8209"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/DNG图片/#L&C-CINE-7.dng",
+      "bytes": 730056,
+      "sha256": "7ec4df8bfc136974a72e5f734b4430da5b42af1b372aee3391b111822f0f9e8b"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/XMP文件/#LC - CINE V1.xmp",
+      "bytes": 5893,
+      "sha256": "8814541cc2151e116f71e8efd37364b8ae9ac6035ba2c9818cf0d386d8269907"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/XMP文件/#LC - CINE V2.xmp",
+      "bytes": 5886,
+      "sha256": "193b80d0fcdfa5262399a1e6980685f360fc4898917eb89c4e03fb99645897ac"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/XMP文件/#LC - CINE V3.xmp",
+      "bytes": 5616,
+      "sha256": "862f813e8a09bf638aa020d46685c6c71499a653787ede4b3503173ef14cd3f3"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/XMP文件/#LC - CINE V4.xmp",
+      "bytes": 5906,
+      "sha256": "99c7fdecc0767d723fc745e396c67cce30e4aba6a8570db00f7ce4dc91d4fc55"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/XMP文件/#LC - CINE V5.xmp",
+      "bytes": 5888,
+      "sha256": "b2c70fe1fd4061e23f56798d416f132afd284647a4cd2e4ad3488dca16404fa2"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/XMP文件/#LC - CINE V6.xmp",
+      "bytes": 5893,
+      "sha256": "9b9aa56b83c07e1960ea787f0bd5cd5d86c052d0a3a2725a91531374d00a7ff1"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/XMP文件/#LC - CINE V7.xmp",
+      "bytes": 5826,
+      "sha256": "dc9523fc1eb75cc1659ca8939ee91d5eb66d41a25e4faee247d6eaf554405e83"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/手机批量导入包-CINE.zip",
+      "bytes": 13184,
+      "sha256": "e64dacda91575d156d888d4e0e414f3b8d429629014a2a7bb6193f106c4e6822"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/电影胶片预设主图V1.jpg",
+      "bytes": 3607404,
+      "sha256": "51ab086077d06ee0ee1976d70a9f7c3fa1847c074145813ae8317588be71c396"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/电影胶片预设主图V2.jpg",
+      "bytes": 3583281,
+      "sha256": "fec7b4ffe82f9d7e2f09a507328946754012cf60c560a270bb0a7363716c4dfc"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/电影胶片预设主图V3.jpg",
+      "bytes": 3368625,
+      "sha256": "d04f3726faf2e1b946c6d812fd07b2a4760887e3d63aba20fd3bb2ebefd503cd"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/电影胶片预设主图V4.jpg",
+      "bytes": 3642939,
+      "sha256": "6a63657f65773ed5344baecf4af051f938aa38f3ff4c95b2ca23c2dbe7b0df52"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/电影胶片预设主图V5.jpg",
+      "bytes": 3643561,
+      "sha256": "580949ca68e3b9009d59e152b8d79ad3c56b65af6f53a75dfd34e74526ceb271"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/电影胶片预设主图V6.jpg",
+      "bytes": 3600981,
+      "sha256": "fb8ca64e39c00555be3d4960a4e44dbec947264821fe25a77db08ee34bf36311"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - CINE/电影胶片预设主图V7.jpg",
+      "bytes": 3420064,
+      "sha256": "3a2fe095d5ba9f0418c395cf7cb228d87bb40788ef37b36311c201656a56de52"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/DNG图片/DSC02262.dng",
+      "bytes": 1115832,
+      "sha256": "66e80510a2b8c697b4050e5dbb7f84ce45e0658673f4294d7090e8082efb6731"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/DNG图片/DSC02270.dng",
+      "bytes": 972296,
+      "sha256": "155f8eab996c7605c4ae0422414b236b41f73ac5a268235c0d90bcc6606e2de5"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/DNG图片/DSC02273.dng",
+      "bytes": 615240,
+      "sha256": "697d8496a0cc45ec4ca1cba24918d5bfe03b203ab69ffef93cfd6b7a013bdd06"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/DNG图片/DSC02290.dng",
+      "bytes": 641810,
+      "sha256": "e82ec0fdbf6fe03e20df673b0c7eee2cf3c0e3b23177854a7a5c150c6c90152c"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/DNG图片/DSC02298.dng",
+      "bytes": 749432,
+      "sha256": "e80e517aa6d69178b29033e3e7b6ed73d96d1a586a9356cdb25ef2fb493ca2a8"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/DNG图片/DSC02303.dng",
+      "bytes": 569022,
+      "sha256": "ee0bdcfe31e9848e34b0461f1c1bbb659eeab7f6d2bfc78272142708aeed0827"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/DNG图片/DSC02309.dng",
+      "bytes": 841014,
+      "sha256": "530b4d737dcb73dd7be4fdb3c561dda47d59126fa38e46de77fd3cbad184ba0f"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/DNG图片/DSC02412.dng",
+      "bytes": 1516522,
+      "sha256": "2fde49431ee3ce10da3e377d7e1e15f8a69ed5c22e224b08e5ec8603277cf699"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/DNG图片/DSC02524.dng",
+      "bytes": 1320764,
+      "sha256": "b56c4686142b1921a133ec089009fc2b2c8349258c73fb5233fd9f7bfab62eec"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/DNG图片/DSC02608.dng",
+      "bytes": 355118,
+      "sha256": "a7da3c872ab38cb828b8bf6eaf945d298877a5fa36055aec4222a5b01341353b"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/DNG图片/DSC02626.dng",
+      "bytes": 1058428,
+      "sha256": "c16816fc81b6211e29ffcf820c7b222dafca3ab6709421f85474c6cb61220089"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/XMP文件/#LC - Snow V1.xmp",
+      "bytes": 6036,
+      "sha256": "30b29440415b90de1031267bf0101a9b63710dddacda1606947a1ba7ba2a9a25"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/XMP文件/#LC - Snow V10.xmp",
+      "bytes": 6349,
+      "sha256": "3593565be6be0c2d9c97a966c314c3ad251bce0b6608d88db91f8b8f55ca5082"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/XMP文件/#LC - Snow V2.xmp",
+      "bytes": 6184,
+      "sha256": "7a1573b134d7db76066287eebc86011b1f8e86cf256bab53b20be2a216d6414d"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/XMP文件/#LC - Snow V3.xmp",
+      "bytes": 5986,
+      "sha256": "ffcfd03820792216f57bf25dcdd2f649f1351e5d556e1a7a1c75e5c31ac04c94"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/XMP文件/#LC - Snow V4.xmp",
+      "bytes": 6249,
+      "sha256": "20f19115375fb8d0c6626dd35eb6b26bfed6d858ad6e11ac9dc807d8ac9c723f"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/XMP文件/#LC - Snow V5.xmp",
+      "bytes": 6322,
+      "sha256": "c4df5dcdc926bf89f45ace9827beaa74ddae64799aa7f7845cc5ef4e7577b915"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/XMP文件/#LC - Snow V6.xmp",
+      "bytes": 6230,
+      "sha256": "b7c31bc8c55214334a507993e0527d1c7621a394ab9b14197d6ac15e757bbd5c"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/XMP文件/#LC - Snow V7.xmp",
+      "bytes": 6016,
+      "sha256": "8b346fa06060bd66f9f03fe26610af69c7d9738f787077935c328da9e959a1a8"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/XMP文件/#LC - Snow V8.xmp",
+      "bytes": 6440,
+      "sha256": "545786028cf40ae3c389b50e83bc0017222be429261a75784f3511a2fb593012"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/XMP文件/#LC - Snow V9.xmp",
+      "bytes": 6273,
+      "sha256": "02473de0551c16c90c9e302221f747a23d5811ff010d8358f55512fcc27c382a"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/手机批量导入包-Winter.zip",
+      "bytes": 18760,
+      "sha256": "fb4ea2f85467bd546b0b515d95583d6c027d7754905e84a065987429d6e1daef"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/案例1.jpg",
+      "bytes": 2405202,
+      "sha256": "5c6db4aa085be12877add1282c4ea0b22f0205c6eddbff20b75a5b58eeeb6a7e"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/案例2.jpg",
+      "bytes": 2982235,
+      "sha256": "60dcbbe6606d30fc27c48753cc29801aaf84fdc10708dd60759235604bfd4c9d"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - Winter/案例3.jpg",
+      "bytes": 3328355,
+      "sha256": "67dcbd3814d3e637ae8d3735867569a5b46d6ce03c7c344f1c60deae366ea08e"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 古风电影/XMP文件/#LC - 柔润古风V1.xmp",
+      "bytes": 6432,
+      "sha256": "f6582cac8ce27100176a7f0446ba85037628c960a5a3e932b9790b129eb85f4c"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 古风电影/XMP文件/#LC - 柔润古风V2.xmp",
+      "bytes": 6431,
+      "sha256": "5ee91ca897ae67e9912b424044c1562091a50d4ab545b111ada18faab32ea940"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 古风电影/XMP文件/#LC - 柔润古风V3.xmp",
+      "bytes": 6435,
+      "sha256": "a1fa7345d505e6a35a67663d6bc0e002d3166b78b8392f95bdab77894666b42e"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 古风电影/XMP文件/#LC - 柔润古风V4.xmp",
+      "bytes": 6434,
+      "sha256": "fca411e95cbcf0175fceb7983a3c9261506b8d5481908d1e38cccbd8f61301af"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 古风电影/XMP文件/#LC - 柔润古风V5.xmp",
+      "bytes": 6430,
+      "sha256": "be1c24bd5fc26bf353a34f07538ecbd594d587d310dd9ecd9e29e9828462ecf3"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 古风电影/手机批量导入包-古风电影.zip",
+      "bytes": 10329,
+      "sha256": "d37fd076e03ed779dd404675d82484127999a22b064bc51e0021c35b886bba57"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 古风电影/柔润古风预设原图.jpg",
+      "bytes": 3055293,
+      "sha256": "f119d785f8abed0adb744e7bb3cb75ee48f9927504095c9da46438f6d044b679"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 古风电影/柔润古风预设后期.jpg",
+      "bytes": 3554562,
+      "sha256": "2570a53d4e49b99579a3580c7c1039ce87e238b3168ee2511e2cf5df390fbaf4"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 沙漠/DNG图片/DJI_0394.dng",
+      "bytes": 220412,
+      "sha256": "7453d3e36104a472c613ce94c4f7c1e66ecc952b29dc787b91e8c21d74a7a716"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 沙漠/DNG图片/DJI_0396.dng",
+      "bytes": 226730,
+      "sha256": "5b0d4e9686ae507399862d37b4a0a325b6fafa3e87bacd455363c59d6b48cc9b"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 沙漠/DNG图片/DJI_0398.dng",
+      "bytes": 232964,
+      "sha256": "544b17e187cc3b33304a31b29c6610ae0905ef298526350978269ed8de0f5ac8"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 沙漠/DNG图片/DSC05746.dng",
+      "bytes": 288532,
+      "sha256": "a1896fa13fa558a0cfcc74c79d83f69361001d0877042ebe915afae9eb03b418"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 沙漠/DNG图片/DSC05748.dng",
+      "bytes": 771600,
+      "sha256": "6e63102e5a1ba0fa745a3ea4a43296d225b29572a3b77cad47d891fe40bb821f"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 沙漠/DNG图片/DSC05749.dng",
+      "bytes": 276352,
+      "sha256": "7316a7e2d01516c1249966cee274f3915e83bd57bd038681fada44cc2931a88d"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 沙漠/DNG图片/DSC05751.dng",
+      "bytes": 531484,
+      "sha256": "5368d04a926fe23cbe0ba1a9cfaf8477f194e13cbb69bb29c7b39add82cc5d28"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 沙漠/DNG图片/DSC05752.dng",
+      "bytes": 799582,
+      "sha256": "046523464eded9d99f4e8f4f052fde67096e3b38b216484983eb178a76788811"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 沙漠/批量导入包 - 沙漠.zip",
+      "bytes": 19624,
+      "sha256": "b29356e508b69c01502a337ca362f6783a5f08b93e86da8dad286de6393b2e68"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 沙漠/案例1.jpg",
+      "bytes": 2231953,
+      "sha256": "e196f6c0562e05dd02d2cf4438e0f2a53e3ef3d364277d9d1d9472b8fb65c0c3"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 沙漠/案例2.jpg",
+      "bytes": 837659,
+      "sha256": "ada1ea27583bb3174ccb7f490b7006212c769b7bbf6574eec907872e89a805b0"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 沙漠/案例3.jpg",
+      "bytes": 2281249,
+      "sha256": "05718b24393a02a7ee138d4521a38c3e669e02a260e276603fadb32dff624274"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/LeoCarbin - 沙漠/案例4.jpg",
+      "bytes": 820169,
+      "sha256": "95b4cd847098b54cb4f598d47242a096b38add144dbb4a08d0e16dcdd668e2b1"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/#LeoCarbin - 原创风格-车间.xmp",
+      "bytes": 7399,
+      "sha256": "fd44ad799e277bc9092e04c53445e9cd0be481e78d104917d96b1426bd2ed43e"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/0-LeoCarbin风格预设使用说明.zip",
+      "bytes": 2996,
+      "sha256": "17a8e3b865d0572bf9f4981051c8a34beb1c17e022e6a8597c1d2822dfad6e26"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/1-#LeoCarbin - 原创风格 - 风光.zip",
+      "bytes": 18519,
+      "sha256": "2a0d9cf04370bc48ba0ae0b49a2ba281a23f9e8e2f7c5676f2f39c57728c5a6a"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/10-#LeoCarbin - 原创风格 - 沙漠.zip",
+      "bytes": 10302,
+      "sha256": "210ab38f9520f1c8e0039928d34869c2b830082d3f501575c8a6f4413a16b69c"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/11-#LeoCarbin - 原创风格 - 静物.zip",
+      "bytes": 15442,
+      "sha256": "213f2e77ea4b1c7cc55faebf674d40d7b00b7fc41e8593341dc146724b554144"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/12-#LC - 色调氛围 - 颜色分级.zip",
+      "bytes": 17360,
+      "sha256": "f7a943149e0e97c17ae81baea4ecb5cdb2d1ed7cbbb04b3105878055a587c491"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/13-#LC - 胶片颗粒.zip",
+      "bytes": 3555,
+      "sha256": "56b756fd082a6e123d819555528b1a33a53efc8fdbf50ad3d4656e940f86e327"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/14-#LC - 蒙版.zip",
+      "bytes": 3680,
+      "sha256": "ba437c46f8da04fc26d168983fc49ff2a21ad789e640a3499f06eb6d4b616bd3"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/2-#LeoCarbin - 原创风格 - 迷雾.zip",
+      "bytes": 13029,
+      "sha256": "a15c9ddc78909ce39e51f57c11cdc32c4f69065347af2f2de0a14af10a1c8f39"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/3-#LeoCarbin - 原创风格 - 晚霞.zip",
+      "bytes": 16985,
+      "sha256": "0ad946f776c60a623680296fc22f6757206ae4a8b7a8d9ed241925e46919b85e"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/4-#LeoCarbin - 原创风格 - 雪景.zip",
+      "bytes": 12965,
+      "sha256": "bfd855433f2e0b297088af8459308ba9e8767fc2eb22042841f98253fb769001"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/5-#LeoCarbin - 原创风格 - 动物.zip",
+      "bytes": 19525,
+      "sha256": "ad99bb66fd431aa84254bd2f1c246ff4423ab8ab52cdff07235b0a4e894d3826"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/6-#LeoCarbin - 原创风格 - 街拍.zip",
+      "bytes": 17701,
+      "sha256": "da1622b29a6e6ec175d8b6895dc4f542c6034b34caec5a130b8f3f38d95aa99a"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/7-#LeoCarbin - 原创风格 - 人像.zip",
+      "bytes": 28759,
+      "sha256": "1ba3f3157234d743fb62723043e40ddc9bdf1dd371a8006008470aae29d0a4bc"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/8-#LeoCarbin - 原创风格 - 植物.zip",
+      "bytes": 19541,
+      "sha256": "05822c69e07f6d31dfcbe8f5cef53295ccdf89443ee95148fe85fd5e0c8410e3"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-个人风格系列/《LeoCarbin个人系列》预设大全 - 7月16日大更新/9-#LeoCarbin - 原创风格 - 夜景.zip",
+      "bytes": 11692,
+      "sha256": "6838530b1143a2d7e4e0f2c7c813b77812639b9f8935cc45ae43d7bc5f24e0b0"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - KIRINOMA预设大全 - 付费版/#LC - KIRINOMA - 暮色梦境.zip",
+      "bytes": 64106,
+      "sha256": "62f9f8f3754ab6a032eadb8d1a3734be9fe8048adea2f3a67d46de568d37208f"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - KIRINOMA预设大全 - 付费版/IMG_2431.dng",
+      "bytes": 5414168,
+      "sha256": "c5fc8b75fee0dd233483ed88a498bf4e6ae17aecd268fe25af27a9d28555d990"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - KIRINOMA预设大全 - 付费版/IMG_2695.dng",
+      "bytes": 5430576,
+      "sha256": "8ee8988a7fb660b9b20ffa533c8bf3b621968fb9f4a56bd43781f6d97d324d34"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - KIRINOMA预设大全 - 付费版/使用声明（必看）.jpg",
+      "bytes": 203960,
+      "sha256": "35c8b4efc722a8b556aae6a2b5b033e8c21f3e3f84a164ca94976232c45cf08a"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Maurice Pehle预设大全 - 付费版/#LC - Maurice Pehle - 德系复古质感胶片.zip",
+      "bytes": 20730,
+      "sha256": "5053bcaab6d3c20c5bba27bfc66effe30097298a4c6286915ae9463af37a66b0"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Maurice Pehle预设大全 - 付费版/使用声明（必看）.jpg",
+      "bytes": 203960,
+      "sha256": "35c8b4efc722a8b556aae6a2b5b033e8c21f3e3f84a164ca94976232c45cf08a"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Maurice Pehle预设大全 - 付费版/原图素材/IMG_2536.DNG",
+      "bytes": 15991898,
+      "sha256": "bfca3ebcc5a701f42838c7c5e9a7b24da3ec12b810be52dc508c585cd784a2b6"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Maurice Pehle预设大全 - 付费版/原图素材/IMG_8361.dng",
+      "bytes": 23488116,
+      "sha256": "c5d0ccb4345d11140eafb99c3373e069992d819baee117a4e18933ae2dba067d"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Maurice Pehle预设大全 - 付费版/原图素材/IMG_8461.DNG",
+      "bytes": 19366107,
+      "sha256": "a5c165a4ed33ae1d18057280d49127b9756c636a5a21612d73a0bfc74c59707b"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Michael Kagerer预设大全 - 付费版/#LC - Michael Kagerer - 森系氛围.zip",
+      "bytes": 19857,
+      "sha256": "9b433a9a44175ac943576b1a40942bcbab432b3a96c498833fe548ee400a721e"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Michael Kagerer预设大全 - 付费版/10-1.png",
+      "bytes": 757901,
+      "sha256": "c5987be4706e9e1444ed6643d0e49d28d44519c3ceb0a23d00add23f73e2bcf2"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Michael Kagerer预设大全 - 付费版/11-1.png",
+      "bytes": 1601758,
+      "sha256": "800e1c6166aa4068034bf040edc7fb8210d4ffbe56fcbbb8dad1a2f62626dc93"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Michael Kagerer预设大全 - 付费版/13-1.png",
+      "bytes": 676024,
+      "sha256": "1b1aeff7461809f962513da02fa00f32770e9744f87687f22cc20d25592e3c21"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Michael Kagerer预设大全 - 付费版/6-1.png",
+      "bytes": 1518926,
+      "sha256": "94218ba5b0384052ff8d23677bee08552d6e2a2454a855857bacec183878b7d5"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Michael Kagerer预设大全 - 付费版/8-1.png",
+      "bytes": 507995,
+      "sha256": "261b83b9c2ca16c34d4feb50caef3150d3ff30b6b2a9aab86fc602b1b8b1d03d"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Michael Kagerer预设大全 - 付费版/使用声明（必看）.jpg",
+      "bytes": 203960,
+      "sha256": "35c8b4efc722a8b556aae6a2b5b033e8c21f3e3f84a164ca94976232c45cf08a"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Tim Northey预设大全 - 付费版/#LC - Tim Northy - 全能电影质感.zip",
+      "bytes": 21307,
+      "sha256": "d9653b7f47d8ae79095ae2351de793ee2e562730c14a7a786443b3388a20d9eb"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Tim Northey预设大全 - 付费版/2024-09-16 113856.dng",
+      "bytes": 10116358,
+      "sha256": "b309d67b9e03696d34e2aaecb8b4709bfbe888b120d5147ac83663d3ff653d95"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Tim Northey预设大全 - 付费版/IMG_2649.dng",
+      "bytes": 6019240,
+      "sha256": "1f2d30f2eaf3eada9b0c82a7c484cc7c7b6d846451b37a2318c4c9585540a63e"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Tim Northey预设大全 - 付费版/使用声明（必看）.jpg",
+      "bytes": 203960,
+      "sha256": "35c8b4efc722a8b556aae6a2b5b033e8c21f3e3f84a164ca94976232c45cf08a"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Tina Sosna预设大全 - 付费版/#LC - Tina Sosna - 低饱情绪.zip",
+      "bytes": 27855,
+      "sha256": "1332ae0fb8dc434252c7e6352f20adaae7d3a5cf3179d4466aa33fdcd8734f67"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - Tina Sosna预设大全 - 付费版/使用声明（必看）.jpg",
+      "bytes": 203960,
+      "sha256": "35c8b4efc722a8b556aae6a2b5b033e8c21f3e3f84a164ca94976232c45cf08a"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - 品川力预设大全 - 付费版/#LC - 品川力-暗系低饱.zip",
+      "bytes": 60552,
+      "sha256": "1fb9f56f30f0e06c7d00ea4ea07b9e28ea10b44dce4ef69a93d28034c66f9e46"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - 品川力预设大全 - 付费版/IMG_2626.dng",
+      "bytes": 5362682,
+      "sha256": "ee1e503b854fb4b24a611294dc1243653b87e9d3a7ef2be485aa4c4ecd2094f7"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - 品川力预设大全 - 付费版/使用声明（必看）.jpg",
+      "bytes": 203960,
+      "sha256": "35c8b4efc722a8b556aae6a2b5b033e8c21f3e3f84a164ca94976232c45cf08a"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - 滨田英明预设大全 - 付费版/#LC - 滨田英明-经典日系胶片.zip",
+      "bytes": 23573,
+      "sha256": "d8899c2ee90933a30109012e595479cb0f52084209aac1bbbb076e5ca7db0435"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - 滨田英明预设大全 - 付费版/IMG_7461.jpg",
+      "bytes": 4261991,
+      "sha256": "90dba8748f43d5f290913e5aee3dc8e191ea23266a8b7ff1306046b18f4ebd07"
+    },
+    {
+      "path": "LeoCarbin-双系列预设/LeoCarbin-名人仿色系列/#LC - 滨田英明预设大全 - 付费版/使用声明（必看）.jpg",
+      "bytes": 203960,
+      "sha256": "35c8b4efc722a8b556aae6a2b5b033e8c21f3e3f84a164ca94976232c45cf08a"
+    },
+    {
+      "path": "LeoCarbin视频教程/2026-05-08_《名人仿色》轻松学会森系调色大法， Michael Kagerer仿色教程，Lightroom保姆级教程，拆解调色原理（附送调色素材）.mp4",
+      "bytes": 41905751,
+      "sha256": "e10ac1182cb67edd9f5f093235c5a36e42692496eb0bb2baab618345d0e0bdb6"
+    },
+    {
+      "path": "LeoCarbin视频教程/2026-05-14_《名人仿色》低饱暗系大法，这个色调学会就是大师， 品川力仿色教程，沉浸式Lightroom保姆级教程，拆解调色原理（附送调色素材）.mp4",
+      "bytes": 35653634,
+      "sha256": "4894136eafa1b2230384764ae4bf57958b680a42b62de5a5b6c6421d74bd6db3"
+    },
+    {
+      "path": "LeoCarbin视频教程/2026-05-21_《名人仿色》日系胶片大法，学会就是胶片大师， 滨田英明仿色教程，沉浸式Lightroom保姆级教程，拆解调色原理（附送调色素材）.mp4",
+      "bytes": 41265196,
+      "sha256": "51c232044f3c3cc6df566ab9015239e5fb3312b618fb154a3a8b911de9e3038e"
+    },
+    {
+      "path": "LeoCarbin视频教程/2026-05-30_《名人仿色》全能调色大法，学会这个色调一定能出片，Tim Northey仿色教程，沉浸式Lightroom保姆级教程，拆解调色原理（附送调色.mp4",
+      "bytes": 45611062,
+      "sha256": "fbcf9bcf36ff0f9b286a6ae7ba34fe72b9e59bb1e4e5b9c2fc1ca972587bbfa1"
+    },
+    {
+      "path": "LeoCarbin视频教程/2026-06-21_《名人仿色》暮色梦境大法，学会这个色调就是情绪大师，KIRINOMA仿色教程，沉浸式Lightroom保姆级教程，拆解调色原理（附送调色素材.mp4",
+      "bytes": 47426961,
+      "sha256": "db80a06313cce5d2e59a5887f1795ac396fa566b64893307c47284d73975b334"
+    },
+    {
+      "path": "LeoCarbin视频教程/2026-07-03_新手如何快速调出质感大片，快速入门后期调色，沉浸式Luminar Neo保姆级教程.mp4",
+      "bytes": 34872971,
+      "sha256": "6991e3e2dad52761f16f2efe9a5e3a52391f35e110947b55c7513b62cdf281dd"
+    },
+    {
+      "path": "LeoCarbin视频教程/2026-07-10_极致去雾大法，学会这个调色技法从此没有废片，沉浸式Lightroom保姆级教程（附送调色素材）.mp4",
+      "bytes": 22570188,
+      "sha256": "a3231fe1cfdba9a5b9a9c7152496a88831c9a11091657f041d453a3475947215"
+    },
+    {
+      "path": "LeoCarbin视频教程/2026-07-18_废片拯救大法，手机就能轻松调色出片，学会这个调色技法肯定能出片，沉浸式Lightroom保姆级教程，拆解调色原理（附送预设）.mp4",
+      "bytes": 33298520,
+      "sha256": "d9b5d0ba38ddff4eed4f33423c7bf6fdf1578170a83db0fe206244525873febc"
+    },
+    {
+      "path": "LeoCarbin视频教程/2026-08-23_《名人仿色》德系复古质感调色，学会它照片质感瞬间拉满， Maurice Pehle仿色教程，沉浸式Lightroom保姆级教程，拆解调色原理.mp4",
+      "bytes": 42185067,
+      "sha256": "6ec7bb69dc39f9f4018ee1b9c3c5f4951d725495234c252bdbb118f2d9052f70"
+    },
+    {
+      "path": "LeoCarbin视频教程/2026-09-02_调色必须学会看懂直方图，教你快速并有效理解直方图原理.mp4",
+      "bytes": 9984598,
+      "sha256": "dbf7584766239bef8104e09849035f91eb2a49e00cae4dba8b1fccc4872c5b51"
+    },
+    {
+      "path": "LeoCarbin视频教程/2026-09-05_学会了用不同的色调氛围，LeoCarbin预设效果展示，在手机就可以调色出片.mp4",
+      "bytes": 5757721,
+      "sha256": "3d70f17aa3fdb23ec1f6afb08264e77e5713fd08ca65b9c68e162eae7f8efa2c"
+    },
+    {
+      "path": "LeoCarbin视频教程/2026-09-15_Lr预设使用，看一遍就懂了，手机平板电脑都可以使用~.mp4",
+      "bytes": 6348883,
+      "sha256": "66746cb63f907d8e63432169055dd36ca38088f69a4ca32d0f9d4e8bccdc2b17"
+    },
+    {
+      "path": "LeoCarbin视频教程/2026-09-17_靠这组预设成为了十万粉博主，LeoCarbin的原创预设合集效果演示，预设使用让照片瞬间提升质感~.mp4",
+      "bytes": 29210391,
+      "sha256": "e623fe3dd81cec8618ef0c37b30e07129c31f24ad729955290a3e6cb4dbcaac2"
+    },
+    {
+      "path": "LeoCarbin视频教程/2026-10-19_《名人仿色》高级灰调哑光质感调色，非常全能的色调影调搭配，Shortstache仿色教程，沉浸式Lightroom保姆级教程，拆解调色原理（.mp4",
+      "bytes": 30718231,
+      "sha256": "354ae12bfd67c75dc5389ac24c496ef9f58ce55d1c62819937e06675db61d166"
+    },
+    {
+      "path": "LeoCarbin视频教程/2026-11-06_夜景后期全靠这组预设，LeoCarbin的原创预设合集效果演示，预设使用让照片瞬间提升质感~.mp4",
+      "bytes": 4457080,
+      "sha256": "86127c96ad88d5da637cfbd69095ea84c67ad44c7c21593bbc18da6b802066f6"
+    },
+    {
+      "path": "LeoCarbin视频教程/2026-11-12_全能的氛围感调色技法，学会它高级的氛围感拉满了，沉浸式Lightroom保姆级教程（附送调色素材）.mp4",
+      "bytes": 27167282,
+      "sha256": "7f5b6e7b6b54bc86841b6d1ddaf9ee9d808252399c739334ea8e62bd3d63196e"
+    }
+  ],
+  "lessons": [
+    {
+      "id": "base_then_palette",
+      "title": "基础明暗与色感分层",
+      "triggers": [
+        "always"
+      ],
+      "lesson": "先按当前原片诊断基础曝光与可恢复高光，再在同一基础上比较独立色感；色感切换不得叠加上一次风格的曝光、白平衡、降噪或镜头设置。分层是计划职责，不要求机械照搬视频的点击顺序。",
+      "avoid": [
+        "不把同组基调、色感、颗粒、颜色分级和蒙版都当作完整候选",
+        "复制到新照片后重新检查亮度，不照抄演示值"
+      ],
+      "review_checks": [
+        "三套结果是否都保留了本片需要的基础明暗恢复，且没有重复叠加校正？"
+      ],
+      "evidence": [
+        {
+          "source_id": "2026-07-18",
+          "locator": "04:04–04:34",
+          "observation": "画面展示模块化预设目录并说明先用基调，再用色感。"
+        },
+        {
+          "source_id": "2026-09-17",
+          "locator": "00:19–01:19",
+          "observation": "先选择预设，再根据当前照片调整曝光、阴影与独立颗粒模块。"
+        },
+        {
+          "source_id": "preset-workflow",
+          "locator": "ZIP 中说明型 XMP 名称",
+          "observation": "使用说明将基调、色感和最后微调拆分。"
+        }
+      ]
+    },
+    {
+      "id": "tone_color_separation",
+      "title": "影调与色调分别判断",
+      "triggers": [
+        "always"
+      ],
+      "lesson": "先确定暗部、中间调和亮部的位置，再用 HSL、通道曲线或亮度色轮组织颜色。直方图描述分布，不给出唯一正确曝光，也不能证明某种颜色就是天空或肤色。",
+      "avoid": [
+        "不把视频临时黑白观察步骤变成最终黑白出片",
+        "不追逐均匀直方图或机械填满 0–255",
+        "不得从 RGB 直方图推断具体局部对象"
+      ],
+      "review_checks": [
+        "是否保持了主体、背景的明暗关系，而非仅让直方图更均匀？"
+      ],
+      "evidence": [
+        {
+          "source_id": "2026-09-02",
+          "locator": "00:19–01:49",
+          "observation": "演示直方图阶调、RGB 通道及对不同照片的色调分析。"
+        },
+        {
+          "source_id": "2026-05-30",
+          "locator": "03:49–05:04",
+          "observation": "分通道观察与影调、色调分别建立；不是单独复制曝光。"
+        }
+      ]
+    },
+    {
+      "id": "fog_depth",
+      "title": "去灰与保留空气透视",
+      "triggers": [
+        "fog",
+        "flat_landscape"
+      ],
+      "lesson": "灰片先检查黑白场与中间调，适量曲线建立层次，再决定是否需要去雾。已有雾气或远景空气时，保留远近反差差异，不把整张图强行去雾。",
+      "avoid": [
+        "视频的大幅压曝光只适用于其演示底片",
+        "不能从低反差单独推断雾气或损坏",
+        "无远近蒙版时不承诺只处理山体或前景"
+      ],
+      "review_checks": [
+        "远景是否仍有空气层次，近景边缘是否出现光晕或过硬轮廓？"
+      ],
+      "evidence": [
+        {
+          "source_id": "2026-07-10",
+          "locator": "00:34–02:19",
+          "observation": "从灰片、曲线和曝光配合建立反差，并说明每张照片情况不同。"
+        },
+        {
+          "source_id": "preset-fog",
+          "locator": "迷雾系列基调与色感",
+          "observation": "迷雾作为独立场景处理，不能与强去灰视为同一目标。"
+        }
+      ]
+    },
+    {
+      "id": "forest_palette",
+      "title": "植物主色与暖色重点",
+      "triggers": [
+        "forest"
+      ],
+      "lesson": "有明确植物主体时，可以整理绿色色相与亮度，控制竞争的蓝紫杂色，并保留暖色主体及叶片光照层次。绿叶、湖水和天空共享色相时，先检查全局 HSL 的连带影响。",
+      "avoid": [
+        "绿转橄榄不是所有自然风光的默认要求",
+        "低饱和不能以消灭叶片光泽和层次为代价"
+      ],
+      "review_checks": [
+        "叶片的亮暗是否可辨，主体暖色与背景是否仍有自然区分？"
+      ],
+      "evidence": [
+        {
+          "source_id": "2026-05-08",
+          "locator": "04:19–10:49",
+          "observation": "鹿、林地与树叶案例中分别演示影调、混色与颜色分级。"
+        },
+        {
+          "source_id": "preset-forest",
+          "locator": "森系 XMP HSL 结构",
+          "observation": "主色整理和其他色相抑制是独立控制。"
+        }
+      ]
+    },
+    {
+      "id": "portrait_material",
+      "title": "明亮肤色与材质分开",
+      "triggers": [
+        "portrait"
+      ],
+      "lesson": "人像的明亮感优先通过中间调与光线关系建立，保留自然肤色层次。避免用全局清晰度、纹理或平滑去替代皮肤处理；当前 subject 蒙版涵盖整个人物。",
+      "avoid": [
+        "不把服饰与皮肤当作可以独立控制的现有蒙版",
+        "不复制胶卷、扫描或布光造成的效果为已实现能力",
+        "暖色物体比例不能作为人像证据"
+      ],
+      "review_checks": [
+        "面部是否仍有纹理和立体过渡，衣服、头发是否因全局平滑丢失细节？"
+      ],
+      "evidence": [
+        {
+          "source_id": "2026-05-21",
+          "locator": "02:49–05:49",
+          "observation": "讲解肤色、胶卷与扫描差异。"
+        },
+        {
+          "source_id": "2026-05-21",
+          "locator": "06:34–09:19",
+          "observation": "通过明暗、曲线和颜色整理建立明亮但有反差的人像。"
+        }
+      ]
+    },
+    {
+      "id": "night_light_hierarchy",
+      "title": "夜景保留夜色与灯光层次",
+      "triggers": [
+        "night"
+      ],
+      "lesson": "夜景保持暗部密度与灯光重点，先让主体和环境明暗可读，再通过亮度分区色轮形成冷暖关系。HSL 减色后还要检查灯牌、车灯、天空与水面的颜色是否被一起破坏。",
+      "avoid": [
+        "不把夜景整体提成白天",
+        "不能把所有蓝青一律去饱和来冒充干净",
+        "不强造原片没有的暖灯或灯光光晕"
+      ],
+      "review_checks": [
+        "灯光是否仍有颜色与过渡，暗处是否仍能区分结构，夜色是否被抬成灰雾？"
+      ],
+      "evidence": [
+        {
+          "source_id": "2026-11-12",
+          "locator": "01:04–01:49",
+          "observation": "先柔和曲线并针对原片调整亮度，再整理竞争颜色。"
+        },
+        {
+          "source_id": "2026-11-12",
+          "locator": "02:34–03:19",
+          "observation": "用颜色分级、通道曲线建立环境与主体的层次。"
+        }
+      ]
+    },
+    {
+      "id": "matte_structure",
+      "title": "柔灰哑光保留中间调骨架",
+      "triggers": [
+        "matte"
+      ],
+      "lesson": "哑光通过小幅抬黑、柔和肩部和受控中间调反差形成，不等于全局变灰。冷暗部与琥珀亮部只在现有场景支持时轻量引导，保留主体的可读细节。",
+      "avoid": [
+        "拍摄减光镜与真实光束不能由配方凭空重造",
+        "不得用全局降饱和和压暗代替曲线层次",
+        "Camera Calibration 未映射时不声称复现完整作者参数"
+      ],
+      "review_checks": [
+        "抬黑后主体是否仍有密度，灰阶是否连续，高光是否被压成无色灰块？"
+      ],
+      "evidence": [
+        {
+          "source_id": "2026-10-19",
+          "locator": "01:04–02:19",
+          "observation": "说明中低调、哑光、高光暖意及拍摄减光镜因素。"
+        },
+        {
+          "source_id": "2026-10-19",
+          "locator": "03:04–03:34",
+          "observation": "曲线分别控制阴影灰阶和锚点。"
+        },
+        {
+          "source_id": "2026-10-19",
+          "locator": "04:19–06:19",
+          "observation": "校准、颜色分级与清晰度是不同环节；临时黑白用于观察。"
+        }
+      ]
+    },
+    {
+      "id": "snow_luminous",
+      "title": "雪景白色与冷暖阴影分离",
+      "triggers": [
+        "snow"
+      ],
+      "lesson": "明确雪景中保留亮雪的清洁明度、受光与阴影的细微色差；不能为了电影感把大面积白雪压成灰色或全幅染蓝。蓝色饱和度调整需要检查阴影与天空是否同时受影响。",
+      "avoid": [
+        "亮白像素不是雪景的充分证据",
+        "雪地不能套用恢复天空的强负曝光蒙版"
+      ],
+      "review_checks": [
+        "雪地亮面是否保有纹理与明度，冷暖是否符合原片光线？"
+      ],
+      "evidence": [
+        {
+          "source_id": "preset-snow",
+          "locator": "Winter / 雪景 XMP 与独立案例",
+          "observation": "雪景包含独立的明暗、蓝色控制和色感变体，数值不直接搬给其他照片。"
+        }
+      ]
+    },
+    {
+      "id": "twilight_capture",
+      "title": "暮色光晕与现场依赖",
+      "triggers": [
+        "twilight"
+      ],
+      "lesson": "暮色可以组织冷环境与暖亮部，但保留现场时间、光源和已有空气感；配方只调整已存在的光色，不生成光束、换天空或重建拍摄内容。",
+      "avoid": [
+        "部分视频参考是创意或 AI 画面，不能当作真实相机显影前后对",
+        "高光光晕、镜头和布光不等价于全局模糊"
+      ],
+      "review_checks": [
+        "暮色是否仍是原来的时间和空间，亮部色彩是否有实际光源依据？"
+      ],
+      "evidence": [
+        {
+          "source_id": "2026-06-21",
+          "locator": "02:04",
+          "observation": "视频明确提到部分画面采用 AI 创作。"
+        },
+        {
+          "source_id": "2026-06-21",
+          "locator": "03:34–07:49",
+          "observation": "对实际底片演示暮色曲线和冷暖关系。"
+        }
+      ]
+    },
+    {
+      "id": "grain_and_detail",
+      "title": "颗粒、噪点与锐化独立",
+      "triggers": [
+        "vintage"
+      ],
+      "lesson": "质感收尾与技术降噪分开。只有低强度颗粒和明确目的的锐化，不从预设批量继承强降噪来换取所谓胶片感；以实际输出尺寸检查皮肤、天空与细线。",
+      "avoid": [
+        "颗粒不恢复已经丢失的细节",
+        "当前执行器不支持的光晕和配置文件不得伪装成已执行"
+      ],
+      "review_checks": [
+        "细颗粒是否服务质感，暗部是否因降噪变蜡，边缘是否出现锐化光晕？"
+      ],
+      "evidence": [
+        {
+          "source_id": "2026-08-23",
+          "locator": "05:49–06:49",
+          "observation": "分别示范真实颗粒观感与光晕效果。"
+        },
+        {
+          "source_id": "preset-grain",
+          "locator": "独立颗粒模块",
+          "observation": "颗粒独立于基调与色感选择。"
+        }
+      ]
+    },
+    {
+      "id": "supported_masks",
+      "title": "局部目标必须可执行",
+      "triggers": [
+        "always"
+      ],
+      "lesson": "局部建议必须映射到已支持的 subject、sky 或 background，并有可识别对象。预设中的渐变、径向、画笔和特定人物蒙版不自动等价为本机语义蒙版。",
+      "avoid": [
+        "不把上方亮等几何渐变强行解释为天空",
+        "不复用预设作者照片的裁切、局部坐标和人物编号"
+      ],
+      "review_checks": [
+        "声称的局部改善是否真的有对应并成功执行的区域控制？"
+      ],
+      "evidence": [
+        {
+          "source_id": "preset-mask",
+          "locator": "独立蒙版 XMP 结构",
+          "observation": "蒙版作为独立模块，含本执行器不能照搬的局部结构。"
+        }
+      ]
+    }
+  ],
+  "numeric_policy_note": "Runtime bounds and new recipes are conservative engineering interpretations, not verbatim video slider values. Raw commercial XMP content stays in the local study report."
+}

@@ -74,6 +74,13 @@ def analyze(linear: np.ndarray, original_path: Path) -> TechnicalReport:
     hist, _ = np.histogram(y, bins=32, range=(0.0, 1.0), density=True)
     hist = (hist / (hist.sum() + 1e-6)).astype(float).tolist()
 
+    usable = (y > .03) & (y < .85) & (np.max(work, axis=-1) < .98)
+    chromatic = usable & ((np.max(work, axis=-1) - np.min(work, axis=-1)) > .08)
+    unclipped_fraction = float(np.mean(usable))
+    unclipped_median = float(np.median(y[usable])) if np.any(usable) else None
+    chromatic_fraction = float(np.mean(chromatic))
+    chromatic_median = float(np.median(y[chromatic])) if np.any(chromatic) else None
+    white_clip = float(np.mean(np.min(work, axis=-1) > .98))
     suggested = _suggest_exposure(
         mean_luma=mean_luma,
         median_luma=median_luma,
@@ -82,7 +89,7 @@ def analyze(linear: np.ndarray, original_path: Path) -> TechnicalReport:
         source_kind=source_kind(original_path),
     )
 
-    return TechnicalReport(
+    report = TechnicalReport(
         width=int(linear.shape[1]),
         height=int(linear.shape[0]),
         source_kind=source_kind(original_path),
@@ -105,6 +112,11 @@ def analyze(linear: np.ndarray, original_path: Path) -> TechnicalReport:
         highlight_p95=highlight_p95,
         exif=read_exif(original_path),
         suggested_exposure_ev=suggested,
+        unclipped_fraction=unclipped_fraction,
+        unclipped_median_luma=unclipped_median,
+        white_clip_fraction=white_clip,
+        chromatic_fraction=chromatic_fraction,
+        chromatic_median_luma=chromatic_median,
         aqua_fraction=aqua_fraction,
         magenta_fraction=magenta_fraction,
         orange_fraction=orange_fraction,
@@ -117,10 +129,25 @@ def analyze(linear: np.ndarray, original_path: Path) -> TechnicalReport:
         margin_waste=comp["margin_waste"],
         thirds_error=comp["thirds_error"],
     )
+    from .exposure import developed_overexposure
+    if developed_overexposure(report):
+        # Broad bright color can need correction before any channel clips.
+        # Retain a luminous high-key result when there is no clipped plateau.
+        clipped = report.highlight_clip > .04
+        target, floor = (.20, -.8) if clipped else (.42, -.6)
+        report.suggested_exposure_ev = float(np.clip(np.log2(target / unclipped_median), floor, -.3))
+    elif report.source_kind in {"jpeg", "png"} and highlight_clip > .04:
+        # A clipped sky above a normally exposed subject is not evidence for
+        # lowering that subject's global exposure.
+        report.suggested_exposure_ev = 0.0
+    return report
 
 
 def correction_from_technical(tech: TechnicalReport) -> CorrectionHint:
     ev = tech.suggested_exposure_ev
+    if ev == 0:
+        from .exposure import developed_lift_ev
+        ev = developed_lift_ev(tech)
     highlights = 0.0
     shadows = 0.0
     whites = 0.0
@@ -182,23 +209,13 @@ def correction_from_technical(tech: TechnicalReport) -> CorrectionHint:
 
 
 def guess_genre(tech: TechnicalReport) -> str:
-    landscape_signal = tech.green_fraction > 0.16 or tech.top_third_blue > 0.20
-    if landscape_signal and tech.skin_fraction < 0.14:
-        return "landscape"
-    if tech.skin_fraction > 0.10:
-        return "portrait"
-    if tech.green_fraction > 0.18 or tech.top_third_blue > 0.22:
+    # Warm stone and sand occupy the same color corridor as skin. Neither its
+    # area nor a telephoto focal length proves a person is present. A visual
+    # diagnosis can still explicitly establish portrait genre downstream.
+    if tech.green_fraction > 0.16 or tech.top_third_blue > 0.20:
         return "landscape"
     if tech.mean_luma < 0.10:
         return "night"
-    if tech.exif.get("FocalLength"):
-        try:
-            fl = str(tech.exif.get("FocalLength", "0"))
-            num = float(fl.split("/")[0]) if "/" in fl else float(fl.split()[0])
-            if num >= 85 and tech.skin_fraction > 0.02:
-                return "portrait"
-        except ValueError:
-            pass
     return "general"
 
 

@@ -117,7 +117,7 @@ def prompt_for(group: str) -> str:
 def prepare(cases_path: Path, output: Path, model: str) -> dict:
     plan_path = output / "frozen-plan.json"
     if plan_path.exists():
-        return json.loads(plan_path.read_text())
+        return json.loads(plan_path.read_text(encoding="utf-8"))
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
         raise RuntimeError("Output has files but no frozen plan; inspect it and use a new output directory.")
@@ -194,7 +194,7 @@ def validate_answer(data: dict, schema: dict) -> dict:
 
 
 def verify_frozen(output: Path, plan: dict) -> None:
-    if sha((output / "frozen-plan.json").read_bytes()) != (output / "frozen-plan.sha256").read_text().strip():
+    if sha((output / "frozen-plan.json").read_bytes()) != (output / "frozen-plan.sha256").read_text(encoding="utf-8").strip():
         raise RuntimeError("Frozen plan hash changed")
     for call in plan["calls"]:
         folder = output / call["id"]
@@ -261,14 +261,14 @@ def summarize(output: Path, plan: dict) -> dict:
     for call in plan["calls"]:
         folder = output / call["id"]
         result_file = folder / "result.json"
-        result = json.loads(result_file.read_text()) if result_file.exists() else {
+        result = json.loads(result_file.read_text(encoding="utf-8")) if result_file.exists() else {
             "status": "attempt_interrupted_or_unknown" if (folder / "attempt.json").exists() else "not_attempted"}
         row = {"id": call["id"], "order": call["order"], "split": call["split"],
                "status": result["status"], "metadata": result.get("response_metadata", {}),
                "error": result.get("error")}
         answer_file = folder / "answer.json"
         if result["status"] == "completed_valid" and answer_file.exists():
-            answers = json.loads(answer_file.read_text())
+            answers = json.loads(answer_file.read_text(encoding="utf-8"))
             mapped = {key: call["panel_mapping"][int(item["choice"]) - 1]
                       if item["choice"] in ("1", "2") else item["choice"] for key, item in answers.items()}
             row.update(answers=answers, physical_choices=mapped)

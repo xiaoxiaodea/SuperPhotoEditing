@@ -180,7 +180,7 @@ def test_nonfinite_legacy_color_is_rejected(invalid: float) -> None:
 def test_hasselblad_legacy_recipe_has_executable_native_color(monkeypatch) -> None:
     from superphoto import masters
 
-    catalog = json.loads((Path(__file__).parents[1] / "src/superphoto/hasselblad_index.json").read_text())
+    catalog = json.loads((Path(__file__).parents[1] / "src/superphoto/hasselblad_index.json").read_text(encoding="utf-8"))
     monkeypatch.setattr(masters, "load_index", lambda: catalog)
     # Use a real stored master with nonzero inferred RGB grading.
     for look_id in catalog["looks"]:
@@ -241,7 +241,7 @@ def test_native_execution_effective_recipe_export_and_rollback_match(tmp_path: P
     effective = Recipe.model_validate(result["effective_recipe"])
     assert effective.grade == Grade()
     assert effective == (Recipe() if reject else native_color_recipe(recipe))
-    exported = json.loads(Path(result["export"]).read_text())
+    exported = json.loads(Path(result["export"]).read_text(encoding="utf-8"))
     assert exported == client.settings == result["develop_after"]
     assert exported == (initial if reject else initial | recipe_to_develop_settings(effective))
     assert len(client.applied) == (2 if reject else 1)

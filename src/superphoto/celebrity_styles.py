@@ -341,9 +341,8 @@ def _color_card(t: TechnicalReport) -> str:
         [
             (t.green_fraction, "绿色"),
             (t.aqua_fraction + t.top_third_blue * 0.5, "青蓝"),
-            (t.orange_fraction, "橙暖色"),
+            (max(t.orange_fraction, t.skin_fraction), "橙暖色"),
             (t.magenta_fraction, "洋红"),
-            (t.skin_fraction, "肤色"),
         ],
         reverse=True,
     )

@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, computed_field
 from .config import Settings
 from .ingest import image_to_srgb, srgb_profile_bytes
 from .models import CorrectionHint, EditIntent, Recipe
-from .ollama import chat_vision, probe
+from .vision import chat_vision, probe, provider_from, safe_error
 
 
 class VisualDamage(BaseModel):
@@ -59,7 +59,7 @@ def review_render(settings: Settings, before: Path, after: Path, intent: EditInt
         return VisualReview(notes=["视觉复核未启用"])
     status = probe(settings)
     if not status.get("ready") or not status.get("resolved_model"):
-        return VisualReview(notes=["视觉模型不可用；仅完成技术检查"])
+        return VisualReview(notes=["视觉模型不可用；仅完成技术检查"], transport_audit={"selection": status})
     prompt = f"""Compare the two numbered panels on this SINGLE image board of the SAME photograph.
 LEFT panel 1 (first) = reference before this step; RIGHT panel 2 (second) = completed proposed result.
 Judge whether panel 2 realizes its specific photographic design. First/second always refer to these panels.
@@ -68,8 +68,8 @@ Stage: {stage}. The automatically inferred editing plan (NOT verified scene fact
 First inspect the reference itself. Its pixels are authoritative about existing colors and detail.
 The plan's preserve descriptions can be wrong: do not claim a warm reflection was originally cool
 because the text says so. Ignore an inferred protection when the reference contradicts it.
-reference_checks are conditional lessons from separately studied photographs, not facts about these
-two images. Apply only checks relevant to what is actually visible here; never demand imitation of
+reference_checks and resource_checks are conditional lessons from separately studied photographs and
+tutorials, not facts about these two images. Apply only checks relevant to what is actually visible here; never demand imitation of
 a master's colors, staging, light direction or subject position. Do not reject a valid image for
 failing an inapplicable study check.
 Inspect focal hierarchy, subject material, direction of light, foreground vs distant layers,
@@ -103,9 +103,10 @@ temperature/tint +/-2. Never change protected color or atmosphere. Otherwise all
             return VisualReview(decision="same", confidence=1.0, source="identical-render",
                                 notes=["参考与输出相同，没有新增调整"])
         raw = chat_vision(settings, status["resolved_model"], prompt,
-                          [build_pair_board(before_preview, after_preview)], audit=transport_audit)
+                          [build_pair_board(before_preview, after_preview)], audit=transport_audit,
+                          selection=status)
         data = _extract_json(raw)
-        data["source"] = "ollama"
+        data["source"] = provider_from(status, transport_audit)
         data["damage_confirmed"] = False
         data["verification"] = {}
         data["transport_audit"] = transport_audit
@@ -131,7 +132,8 @@ Return JSON {"confirmed":false,"confidence":0.0,
 /no_think"""
             try:
                 checked = _extract_json(chat_vision(settings, status["resolved_model"], verification,
-                    [build_pair_board(after_preview, before_preview)], audit=verification_transport_audit))
+                    [build_pair_board(after_preview, before_preview)], audit=verification_transport_audit,
+                    selection=status))
                 review.verification = checked
                 review.damage_confirmed = (
                     checked.get("confirmed") is True
@@ -161,7 +163,8 @@ Return JSON {"confirmed":false,"confidence":0.0,
                                          "transport_audit": transport_audit,
                                          "verification_transport_audit": verification_transport_audit})
     except Exception as exc:
-        return VisualReview(notes=[f"视觉复核不可用：{type(exc).__name__}"],
+        transport_audit["stage_error"] = {"type": type(exc).__name__}
+        return VisualReview(notes=[f"视觉复核不可用：{safe_error(exc)}"],
                             transport_audit=transport_audit,
                             verification_transport_audit=verification_transport_audit)
 

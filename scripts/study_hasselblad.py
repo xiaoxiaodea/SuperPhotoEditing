@@ -30,12 +30,12 @@ from superphoto.color import srgb_to_linear
 
 
 def inventory(primary: Path, legacy: Path) -> list[dict]:
-    manifest = [json.loads(line) for line in (primary / "manifest.jsonl").read_text().splitlines() if line.strip()]
+    manifest = [json.loads(line) for line in (primary / "manifest.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
     main_meta = {row["path"]: row for row in manifest}
     catalog_path = legacy.parent / "catalog.json"
     old_meta = {}
     if catalog_path.is_file():
-        old_meta = {Path(row["file"]).name: row for row in json.loads(catalog_path.read_text())["items"]
+        old_meta = {Path(row["file"]).name: row for row in json.loads(catalog_path.read_text(encoding="utf-8"))["items"]
                     if row.get("award") == "hasselblad_masters"}
     records = {}
     for corpus, root in (("ph-main", primary), ("legacy", legacy)):
@@ -203,7 +203,7 @@ def main():
     for record in records:
         path = output / (record["id"] + ".json")
         if path.exists():
-            saved = json.loads(path.read_text())
+            saved = json.loads(path.read_text(encoding="utf-8"))
             if saved.get("sha256") == record["sha256"] and saved.get("schema_version") == 3 and saved.get("status") == "complete":
                 try:
                     StudyAnalysis.model_validate(saved["analysis"])

@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import uuid
+import time
+from threading import Event
 
 from fastapi.testclient import TestClient
 import pytest
@@ -79,7 +81,12 @@ def test_interpreter_cannot_add_local_relighting_or_color_changes_to_brightness_
 def test_api_multiple_votes_and_revision_request_idempotency(ready, monkeypatch):
     appmod, settings, conn, root, base = ready
     calls = []
-    monkeypatch.setattr(appmod, "_safe_refine", lambda rid: calls.append(rid))
+    started, release = Event(), Event()
+    def refine(rid):
+        calls.append(rid)
+        started.set()
+        assert release.wait(5)
+    monkeypatch.setattr(appmod, "_safe_refine", refine)
     with TestClient(appmod.app) as client:
         for slot, verdict in (("A", "like"), ("B", "dislike"), ("C", "like")):
             response = client.put(f"/api/jobs/photo/ratings/{slot}", json={"verdict": verdict})
@@ -93,6 +100,7 @@ def test_api_multiple_votes_and_revision_request_idempotency(ready, monkeypatch)
         one = client.post("/api/jobs/photo/refinements", json=body)
         assert one.status_code == 202, one.text
         assert client.post("/api/jobs/photo/refinements", json=body).json()["id"] == request_id
+        assert started.wait(5)
         assert calls == [request_id]
         assert client.post("/api/jobs/photo/refinements", json=body | {"prompt": "整体暗一点"}).status_code == 409
         assert client.post("/api/jobs/photo/refinements", json=body | {"request_id": str(uuid.uuid4())}).status_code == 409
@@ -100,7 +108,8 @@ def test_api_multiple_votes_and_revision_request_idempotency(ready, monkeypatch)
         assert client.get(f"/api/jobs/another/refinements/{request_id}").status_code == 404
         assert client.post("/api/jobs/photo/refinements", json=body | {"prompt": "   "}).status_code == 422
         assert client.post("/api/jobs/photo/refinements", json=body | {"prompt": "亮" * 1001}).status_code == 422
-        assert client.get("/api/jobs/photo").json()["refinements"][0]["status"] == "queued"
+        assert client.get("/api/jobs/photo").json()["refinements"][0]["status"] == "running"
+        release.set()
 
 
 def fake_render(monkeypatch, root, *, skipped=None, error=False):
@@ -121,6 +130,32 @@ def fake_render(monkeypatch, root, *, skipped=None, error=False):
     monkeypatch.setattr(ref, "render_distance", lambda *a: 1.0)
     monkeypatch.setattr(ref, "review_render", lambda *a: VisualReview(decision="same"))
     return calls
+
+
+def test_lifespan_worker_runs_claimed_refinement_through_pipeline(ready, monkeypatch):
+    appmod, settings, conn, root, base = ready
+    calls = fake_render(monkeypatch, root)
+    monkeypatch.setattr(ref, "interpret_feedback", lambda settings, image, recipe, prompt, **kwargs:
+                        (ref._simple_edits(prompt), {"provider": "local"}))
+    request_id = str(uuid.uuid4())
+    body = {"slot": "B", "prompt": "整体亮一点", "request_id": request_id}
+    with TestClient(appmod.app) as client:
+        response = client.post("/api/jobs/photo/refinements", json=body)
+        assert response.status_code == 202, response.text
+        deadline = time.monotonic() + 5
+        while True:
+            record = get_refinement(conn, request_id)
+            if record["status"] not in {"queued", "running"}:
+                break
+            assert time.monotonic() < deadline, record
+            Event().wait(.01)
+        assert record["status"] == "ready", record["error"]
+        assert len(calls) == 1
+        repeated = client.post("/api/jobs/photo/refinements", json=body)
+        assert repeated.json()["id"] == request_id
+        assert repeated.json()["status"] == "ready"
+        assert len(calls) == 1
+        assert client.get(f"/api/jobs/photo/refinements/{request_id}/image").status_code == 200
 
 
 def test_native_revision_retains_original_and_supports_chained_versions(ready, monkeypatch):
@@ -175,7 +210,11 @@ def test_restart_releases_abandoned_refinement_for_retry(ready):
     appmod, settings, conn, root, base = ready
     rid = str(uuid.uuid4())
     insert_refinement(conn, rid, "photo", "B", None, "整体亮一点")
+    update_refinement(conn, rid, status="running", step="render")
     appmod.reset_runtime()
     _, conn = appmod._boot()
-    assert get_refinement(conn, rid)["status"] == "error"
+    # Recovery happens only after the lifespan worker obtains its OS lock.
+    with TestClient(appmod.app):
+        assert get_refinement(conn, rid)["status"] == "error"
+        assert "中断" in get_refinement(conn, rid)["error"]
     insert_refinement(conn, str(uuid.uuid4()), "photo", "B", None, "整体亮一点")

@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import shutil
+import tarfile
 import subprocess
 import tempfile
+import threading
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
@@ -104,8 +107,26 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def cli_name() -> str:
+    return "lightcraft-cli.exe" if sys_platform() == "win32" else "lightcraft-cli"
+
+
+def release_asset() -> str:
+    """Official portable bundles contain the CLI alongside the desktop binary."""
+    system, machine = sys_platform(), platform.machine().lower()
+    if system == "darwin":
+        return CLI_ZIP
+    if system == "win32" and machine in {"amd64", "x86_64", "arm64", "aarch64"}:
+        arch = "arm64" if machine in {"arm64", "aarch64"} else "x64"
+        return f"lightcraft-{PINNED_VERSION}-windows-{arch}-portable.zip"
+    if system.startswith("linux") and machine in {"amd64", "x86_64", "arm64", "aarch64"}:
+        arch = "aarch64" if machine in {"arm64", "aarch64"} else "x86_64"
+        return f"lightcraft-{PINNED_VERSION}-linux-{arch}.tar.gz"
+    raise LightCraftError(f"未提供 {system}/{machine} 的自动安装包；请设置 SUPERPHOTO_LIGHTCRAFT_BIN。")
+
+
 def bundled_cli_path() -> Path:
-    return project_root() / "vendor" / "lightcraft" / "lightcraft-cli"
+    return project_root() / "vendor" / "lightcraft" / cli_name()
 
 
 def discover_cli(explicit: Path | None = None) -> Path | None:
@@ -121,7 +142,7 @@ def discover_cli(explicit: Path | None = None) -> Path | None:
         candidates.append(Path(found))
     root = os.environ.get("SUPERPHOTO_ROOT")
     if root:
-        candidates.append(Path(root) / "vendor" / "lightcraft" / "lightcraft-cli")
+        candidates.append(Path(root) / "vendor" / "lightcraft" / cli_name())
     candidates.append(bundled_cli_path())
     for path in candidates:
         if path.is_file() and os.access(path, os.X_OK):
@@ -130,26 +151,30 @@ def discover_cli(explicit: Path | None = None) -> Path | None:
 
 
 def install_cli(destination: Path | None = None) -> dict[str, Any]:
-    """Download the pinned macOS universal CLI into vendor/lightcraft."""
-    if sys_platform() != "darwin":
-        raise LightCraftError(
-            f"自动安装只覆盖 macOS。请从 {RELEASE}/{CLI_ZIP} 下载对应平台的 lightcraft-cli，"
-            "放到 vendor/lightcraft/lightcraft-cli，或设置 SUPERPHOTO_LIGHTCRAFT_BIN。"
-        )
+    """Install a checksum-verified native CLI without extracting unrelated files."""
+    asset = release_asset()
     target = destination or bundled_cli_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="lightcraft-") as tmp:
-        archive = Path(tmp) / CLI_ZIP
-        _download(f"{RELEASE}/{CLI_ZIP}", archive)
+    with tempfile.TemporaryDirectory(prefix="lightcraft-download-") as tmp:
+        archive = Path(tmp) / asset
+        _download(f"{RELEASE}/{asset}", archive)
         _verify_archive(archive)
-        with zipfile.ZipFile(archive) as bundle:
-            bundle.extractall(tmp)
-        binary = _find_binary(Path(tmp))
-        if binary is None:
-            raise LightCraftError(f"{CLI_ZIP} 里没有可执行的 lightcraft-cli。")
-        shutil.copy2(binary, target)
-    target.chmod(target.stat().st_mode | 0o755)
-    version = _version(target)
+        with tempfile.TemporaryDirectory(prefix="lightcraft-extract-") as extracted:
+            binary = Path(extracted) / cli_name()
+            _extract_cli(archive, binary)
+            binary.chmod(binary.stat().st_mode | 0o755)
+            version = _version(binary)
+            if not version:
+                raise LightCraftError("下载的 LightCraft CLI 无法在本机运行，原有安装未替换。")
+            # Stage beside the destination so replacement is atomic on its volume.
+            fd, staged_name = tempfile.mkstemp(prefix="lightcraft-", suffix=target.suffix, dir=target.parent)
+            os.close(fd)
+            staged = Path(staged_name)
+            try:
+                shutil.copy2(binary, staged)
+                staged.replace(target)
+            finally:
+                staged.unlink(missing_ok=True)
     return {
         "ok": True,
         "binary": str(target),
@@ -168,11 +193,15 @@ def adobe_to_lightcraft(adobe: dict[str, Any], masks: list[dict[str, Any]]) -> d
     """Translate the slider dict the recipe planner already produces."""
     doc: dict[str, Any] = {}
     if adobe.get("WhiteBalance") == "Custom":
-        doc["wb"] = {
-            "mode": "custom",
-            "temp": adobe.get("Temperature", 6500),
-            "tint": adobe.get("Tint", 0),
-        }
+        import math
+
+        temperature, tint = adobe.get("Temperature"), adobe.get("Tint")
+        if (isinstance(temperature, bool) or isinstance(tint, bool)
+                or not isinstance(temperature, (int, float)) or not isinstance(tint, (int, float))
+                or not math.isfinite(temperature) or not math.isfinite(tint)
+                or not 2000 <= temperature <= 50000 or not -150 <= tint <= 150):
+            raise LightCraftError("自定义白平衡需要有效的色温和色调；不能使用猜测的默认值。")
+        doc["wb"] = {"mode": "custom", "temp": temperature, "tint": tint}
     light = {name: adobe[key] for key, name in _LIGHT.items() if key in adobe}
     if light:
         doc["light"] = light
@@ -310,11 +339,9 @@ def _curve_points(flat: Any) -> list[dict[str, float]]:
 
 @dataclass
 class _PhotoState:
-    adobe: dict[str, Any] = field(default_factory=lambda: {
-        "WhiteBalance": "As Shot",
-        "Temperature": 6500.0,
-        "Tint": 0.0,
-    })
+    # This CLI adapter has no source WB metadata. Omit unknown numeric bases so
+    # relative edits preserve As Shot instead of converting from an invented Kelvin.
+    adobe: dict[str, Any] = field(default_factory=lambda: {"WhiteBalance": "As Shot"})
     masks: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -351,7 +378,8 @@ class LightCraftClient:
             return {"ok": True}
         if name == "get_photo_metadata":
             photo = self._state(str(args.get("photo_id") or ""))
-            return {"developSettings": dict(photo.adobe)}
+            return {"developSettings": dict(photo.adobe), "settings_source": "planned",
+                    "source_metadata_available": False}
         if name == "set_develop_settings":
             photo = self._state(str(args.get("photo_id") or ""))
             photo.adobe.update(args.get("settings") or {})
@@ -359,13 +387,37 @@ class LightCraftClient:
         if name == "apply_ai_mask":
             return self._apply_mask(args)
         if name == "create_develop_preset":
-            return {"success": True, "name": args.get("preset_name"), "engine": "lightcraft"}
+            return self._save_checkpoint(args)
         if name == "export_photos":
             return self._export(args, timeout=timeout or 300.0)
         raise LightCraftError(f"LightCraft 工具 {name} 未实现")
 
     def _state(self, photo_id: str) -> _PhotoState:
         return self._photos.setdefault(photo_id, _PhotoState())
+
+    def _save_checkpoint(self, args: dict[str, Any]) -> dict[str, Any]:
+        import hashlib
+
+        photo_id = str(args.get("photo_id") or "")
+        if not photo_id:
+            raise LightCraftError("保存配方缺少照片路径")
+        name = str(args.get("preset_name") or "accepted")
+        state = self._state(photo_id)
+        document = adobe_to_lightcraft(state.adobe, state.masks)
+        folder = Path(photo_id).parent / "lightcraft-checkpoints"
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / (hashlib.sha256(name.encode("utf-8")).hexdigest()[:24] + ".json")
+        fd, temporary = tempfile.mkstemp(dir=folder, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as output:
+                json.dump(document, output, ensure_ascii=False, indent=2)
+                output.flush()
+                os.fsync(output.fileno())
+            Path(temporary).replace(target)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+        return {"success": True, "name": name, "engine": "lightcraft", "path": str(target),
+                "format": "lightcraft-develop-json", "settings_source": "planned"}
 
     def _apply_mask(self, args: dict[str, Any]) -> dict[str, Any]:
         photo = self._state(str(args.get("photo_id") or ""))
@@ -379,7 +431,8 @@ class LightCraftClient:
         record = {"target": target, "mask_id": mask_id, "settings": dict(args.get("settings") or {})}
         photo.masks = [mask for mask in photo.masks if mask["target"] != target]
         photo.masks.append(record)
-        return {"success": True, "mask_id": mask_id, "target": target, "settings": record["settings"]}
+        return {"success": True, "mask_id": mask_id, "target": target, "settings": record["settings"],
+                "status": "planned", "verified": False}
 
     def _export(self, args: dict[str, Any], *, timeout: float) -> dict[str, Any]:
         ids = args.get("photo_ids") or []
@@ -390,26 +443,139 @@ class LightCraftClient:
         if not source.is_file():
             raise LightCraftError(f"找不到作业底片：{source}")
         destination = Path(str(args.get("destination") or ""))
-        destination.mkdir(parents=True, exist_ok=True)
-        output = destination / "render.jpg"
         photo = self._state(photo_id)
         document = adobe_to_lightcraft(photo.adobe, photo.masks)
-        settings_path = destination / "develop.json"
-        settings_path.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
         edge = int(args.get("width") or args.get("height") or 0)
-        command = [str(self.binary), "render", str(source), "-o", str(output), "--settings", str(settings_path), "--quality", "92"]
-        if edge > 0:
-            command.extend(["--size", str(edge)])
+        output = render_document(self.binary, source, document, destination, edge=edge, timeout=timeout)
+        return {"count": 1, "path": str(output), "engine": "lightcraft"}
+
+
+# A develop document's "wb" in this mode holds an offset (Kelvin, tint) from the file's as-shot white balance;
+# render_document turns it into the engine's custom mode with the RAW's own as-shot reading. The planner's global
+# white balance is an offset, and before this a RAW (whose as-shot value we did not know) dropped it altogether,
+# so a RAW could not be warmed globally: on the flat desert RAW DSC05752 (as shot 5551 K / +12) a custom 7000 K
+# took frame colourfulness from .186 to .283 at the same tone (his finished edit: .318), more than saturation
+# +30 more (.217). LightCraft reports the as-shot reading through `run --import <file> develop.wb`.
+RELATIVE_WB_MODE = "asShotOffset"
+_AS_SHOT: dict[str, tuple[float, float] | None] = {}
+_AS_SHOT_LOCK = threading.Lock()
+
+
+def as_shot_wb(binary: Path, source: Path, *, timeout: float = 120.0) -> tuple[float, float] | None:
+    """The (Kelvin, tint) white balance LightCraft reads from a RAW as shot, cached per file; None if unknown."""
+    path = Path(source).resolve()
+    try:
+        key = f"{path}|{path.stat().st_mtime_ns}"
+    except OSError:
+        return None
+    with _AS_SHOT_LOCK:
+        if key in _AS_SHOT:
+            return _AS_SHOT[key]
+    value: tuple[float, float] | None = None
+    try:
+        completed = subprocess.run([str(binary), "run", "--import", str(path), "develop.wb"], capture_output=True,
+                                   text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        for line in (completed.stdout or "").splitlines():
+            try:
+                answer = json.loads(line)
+            except ValueError:
+                continue
+            result = answer.get("result") if isinstance(answer, dict) and answer.get("ok") else None
+            if isinstance(result, dict) and answer.get("command") == "develop.wb":
+                temp, tint = float(result["temp"]), float(result.get("tint", 0.0))
+                if 2000.0 <= temp <= 50000.0 and -150.0 <= tint <= 150.0:
+                    value = (temp, tint)
+    except (OSError, subprocess.TimeoutExpired, KeyError, TypeError, ValueError):
+        value = None
+    with _AS_SHOT_LOCK:
+        _AS_SHOT[key] = value
+    return value
+
+
+def resolve_wb(binary: Path, source: Path, document: dict[str, Any]) -> dict[str, Any]:
+    """The document with an as-shot-relative white balance made absolute; dropped when the reading fails."""
+    wb = document.get("wb")
+    if not isinstance(wb, dict) or wb.get("mode") != RELATIVE_WB_MODE:
+        return document
+    resolved = {key: value for key, value in document.items() if key != "wb"}
+    shot = as_shot_wb(binary, source)
+    if shot is not None:
+        resolved["wb"] = {"mode": "custom",
+                          "temp": round(min(50000.0, max(2000.0, shot[0] + float(wb.get("temp", 0.0)))), 1),
+                          "tint": round(min(150.0, max(-150.0, shot[1] + float(wb.get("tint", 0.0)))), 2)}
+    return resolved
+
+
+def render_document(binary: Path, source: Path, document: dict[str, Any], destination: Path, *,
+                    edge: int = 0, timeout: float = 300.0) -> Path:
+    """Render one LightCraft develop document to destination/render.jpg.
+
+    The document is written beside the render as develop.json, so every
+    delivered file keeps the exact native settings that produced it (an
+    as-shot-relative white balance already made absolute, see resolve_wb).
+    """
+    document = resolve_wb(binary, source, document)
+    destination.mkdir(parents=True, exist_ok=True)
+    output = destination / "render.jpg"
+    settings_path = destination / "develop.json"
+    settings_path.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
+    command = [str(binary), "render", str(source), "-o", str(output), "--settings", str(settings_path), "--quality", "92"]
+    if edge > 0:
+        command.extend(["--size", str(edge)])
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise LightCraftError("LightCraft 导出超时") from exc
+    except OSError as exc:
+        raise LightCraftError(f"无法运行 lightcraft-cli：{exc}") from exc
+    if completed.returncode != 0 or not output.is_file():
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise LightCraftError("LightCraft 导出失败" + (f"：{detail[-800:]}" if detail else ""))
+    return output
+
+
+def sample_colors(binary: Path, source: Path, points: list[tuple[float, float]], *,
+                  timeout: float = 120.0) -> list[list[float]]:
+    """Colour of the unedited photo at normalized points, in the engine's own colour-range space.
+
+    A colour-range mask needs samples in LightCraft's internal (Oklab-like)
+    values; asking the engine avoids any mismatch with our own conversion.
+    """
+    if not points:
+        return []
+    lines = []
+    for x, y in points:
+        lines.append(json.dumps({"command": "mask.add", "params": {"kind": "colorRange", "name": "sample"}}))
+        lines.append(json.dumps({"command": "mask.sampleColor", "params": {"x": float(x), "y": float(y)}}))
+    fd, script = tempfile.mkstemp(suffix=".jsonl", prefix="lc-sample-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+        command = [str(binary), "run", "--keep-going", "--import", str(source), "--script", script]
         try:
-            completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+            completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                       timeout=timeout)
         except subprocess.TimeoutExpired as exc:
-            raise LightCraftError("LightCraft 导出超时") from exc
+            raise LightCraftError("LightCraft 取色超时") from exc
         except OSError as exc:
             raise LightCraftError(f"无法运行 lightcraft-cli：{exc}") from exc
-        if completed.returncode != 0 or not output.is_file():
-            detail = (completed.stderr or completed.stdout or "").strip()
-            raise LightCraftError("LightCraft 导出失败" + (f"：{detail[-800:]}" if detail else ""))
-        return {"count": 1, "path": str(output), "engine": "lightcraft"}
+    finally:
+        Path(script).unlink(missing_ok=True)
+    samples: list[list[float]] = []
+    for line in (completed.stdout or "").splitlines():
+        if '"mask.sampleColor"' not in line:
+            continue
+        try:
+            record = json.loads(line)
+            values = record["result"]["samples"][-1] if record.get("ok") is True else None
+        except (ValueError, KeyError, IndexError, TypeError):
+            values = None
+        if not (isinstance(values, list) and len(values) == 3):
+            raise LightCraftError("LightCraft 取色失败")
+        samples.append([float(v) for v in values])
+    if len(samples) != len(points):
+        raise LightCraftError("LightCraft 取色结果不完整")
+    return samples
 
 
 def _download(url: str, destination: Path) -> None:
@@ -428,15 +594,37 @@ def _verify_archive(archive: Path) -> None:
     expected = ""
     for line in sums.splitlines():
         parts = line.split()
-        if len(parts) >= 2 and parts[-1] == CLI_ZIP:
+        if len(parts) >= 2 and parts[-1].lstrip("*") == archive.name:
             expected = parts[0]
             break
     if not expected:
-        raise LightCraftError(f"校验清单里没有 {CLI_ZIP}")
+        raise LightCraftError(f"校验清单里没有 {archive.name}")
     import hashlib
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     if digest != expected:
         raise LightCraftError("LightCraft 安装包校验不一致，已停止安装。")
+
+
+def _extract_cli(archive: Path, target: Path) -> None:
+    """Copy only a regular CLI file to an explicit path; never unpack archive paths."""
+    wanted = cli_name()
+    if archive.name.endswith(".zip"):
+        with zipfile.ZipFile(archive) as bundle:
+            matches = [entry for entry in bundle.infolist()
+                       if Path(entry.filename).name == wanted and not entry.is_dir()
+                       and (entry.external_attr >> 16) & 0o170000 != 0o120000]
+            if len(matches) != 1:
+                raise LightCraftError(f"{archive.name} 里没有唯一的 {wanted}。")
+            with bundle.open(matches[0]) as source, target.open("wb") as output:
+                shutil.copyfileobj(source, output)
+    else:
+        with tarfile.open(archive, "r:gz") as bundle:
+            matches = [entry for entry in bundle.getmembers()
+                       if Path(entry.name).name == wanted and entry.isfile()]
+            if len(matches) != 1:
+                raise LightCraftError(f"{archive.name} 里没有唯一的 {wanted}。")
+            with bundle.extractfile(matches[0]) as source, target.open("wb") as output:
+                shutil.copyfileobj(source, output)
 
 
 def _find_binary(root: Path) -> Path | None:
@@ -451,7 +639,7 @@ def _find_binary(root: Path) -> Path | None:
 
 def _version(binary: Path) -> str:
     try:
-        completed = subprocess.run([str(binary), "--version"], capture_output=True, text=True, timeout=20)
+        completed = subprocess.run([str(binary), "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
     except (OSError, subprocess.TimeoutExpired):
         return ""
     if completed.returncode != 0:

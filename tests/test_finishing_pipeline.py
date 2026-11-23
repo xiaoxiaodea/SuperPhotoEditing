@@ -123,13 +123,13 @@ def finishing_job(tmp_path, monkeypatch):
 
 
 def _assert_matching_delivery(state, selected_directory, expected_contrast, expected_score):
-    audit = json.loads((state.root / "lightroom-audits/variant_A.json").read_text())
-    sidecar = json.loads((state.root / "variant_A.json").read_text())
+    audit = json.loads((state.root / "lightroom-audits/variant_A.json").read_text(encoding="utf-8"))
+    sidecar = json.loads((state.root / "variant_A.json").read_text(encoding="utf-8"))
     stored = json.loads(get_variants(state.conn, "finishing")[0]["recipe_json"])
     selected_export = Path(audit["accepted_export"])
     assert selected_export.parent.name == selected_directory
     assert (state.root / "variant_A.jpg").read_bytes() == selected_export.read_bytes()
-    rendered = json.loads(selected_export.read_text())
+    rendered = json.loads(selected_export.read_text(encoding="utf-8"))
     assert audit["accepted_photo"] == rendered["photo"]
     assert audit["accepted_recipe"] == rendered["recipe"]
     assert audit["accepted_recipe"]["contrast"] == pytest.approx(expected_contrast)
@@ -142,7 +142,7 @@ def _assert_matching_delivery(state, selected_directory, expected_contrast, expe
     assert selected["settings_applied"]["Contrast2012"] == pytest.approx(expected_contrast * 100)
     assert state.checkpoints[-1]["photo"] == Path(audit["accepted_photo"])
     assert state.checkpoints[-1]["settings"]["Contrast2012"] == pytest.approx(expected_contrast * 100)
-    summary = json.loads((state.root / "lightroom-qa.json").read_text())["slots"]["A"]
+    summary = json.loads((state.root / "lightroom-qa.json").read_text(encoding="utf-8"))["slots"]["A"]
     assert summary["stages"] == [selected_directory]
     assert summary["score"] == expected_score
     return audit

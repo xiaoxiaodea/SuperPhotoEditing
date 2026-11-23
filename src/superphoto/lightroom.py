@@ -126,16 +126,9 @@ def lightroom_status(enabled: bool = True, server_path: Path | None = None) -> d
         }
     with _client_lock:
         active = _client
-    if active is None:
-        return {
-            "enabled": True,
-            "available": True,
-            "connected": True,
-            "engine": "lightcraft",
-            "binary": str(binary),
-            "error": None,
-            "tools": [],
-        }
+    if active is None or active.binary != binary:
+        from .lightcraft import LightCraftClient
+        active = LightCraftClient(binary)
     status = active.status()
     status["enabled"] = True
     return status

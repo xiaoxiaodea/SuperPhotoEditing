@@ -3,133 +3,132 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>SuperPhoto · 诊断 · 配方 · 裁决</title>
+    <meta name="color-scheme" content="dark" />
+    <title>SuperPhoto · 照片工作室</title>
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
-    <style>
-      html, body { margin: 0; min-height: 100%; background: #0c0b09; color: #f4efe4; }
-    </style>
-    <link rel="stylesheet" href="./styles.css?v=18" />
+    <style>html, body { margin: 0; min-height: 100%; background: #141516; color: #eeeeef; }</style>
+    <link rel="stylesheet" href="./styles.css?v=21" />
   </head>
   <body>
     <header class="top">
-      <div class="brand">
-        <span class="mark" aria-hidden="true"></span>
-        <div>
-          <strong>SuperPhoto</strong>
-          <span>缺陷 · 路线 · 仿色 · LightCraft</span>
-        </div>
+      <a class="brand" href="./" aria-label="SuperPhoto 首页">
+        <svg class="mark" viewBox="0 0 32 32" fill="none" aria-hidden="true"><rect x="3" y="3" width="26" height="26" rx="7" stroke="currentColor" stroke-width="1.5"/><path d="M10 21V11h12M10 17h8M22 11v10H10" stroke="currentColor" stroke-width="1.5"/><circle cx="22" cy="11" r="3" fill="currentColor"/></svg>
+        <strong>SuperPhoto<span class="brand-dot">.</span></strong>
+      </a>
+      <span class="workspace-label">照片工作室</span>
+      <div class="top-actions">
+        <button type="button" id="new-photo" class="btn ghost hidden"><span aria-hidden="true">＋</span> 导入新照片</button>
+        <button type="button" id="vision-open" class="btn ghost">视觉模型</button>
+        <details class="engine-status">
+          <summary><span class="status-dot" aria-hidden="true"></span>引擎状态</summary>
+          <p class="health" id="health" role="status">正在检查引擎…</p>
+        </details>
       </div>
-      <div class="health" id="health">正在检查引擎…</div>
     </header>
 
+    <section id="auth-stage" class="stage hidden">
+      <form id="auth-form" class="auth-card">
+        <span class="eyebrow">PRIVATE STUDIO</span>
+        <h1>欢迎回到工作室</h1>
+        <p class="lede">输入访问令牌，连接你的照片与处理记录。</p>
+        <label for="auth-token">访问令牌</label>
+        <input id="auth-token" type="password" autocomplete="current-password" placeholder="输入访问令牌" required />
+        <button class="btn primary" type="submit">进入工作室 <span aria-hidden="true">↗</span></button>
+        <p id="auth-error" role="alert"></p>
+      </form>
+    </section>
+
     <main>
-      <section id="drop-stage" class="stage">
-        <form id="drop" class="drop" tabindex="0">
+      <section id="drop-stage" class="stage import-stage">
+        <div class="import-intro">
+          <p class="eyebrow"><span class="small-line"></span> A LITTLE LIGHT. A NEW PERSPECTIVE.</p>
+          <h1>让好照片，<br />更进一步<span class="accent">。</span></h1>
+          <p class="intro-copy">从原片出发，找到合适的光影与色彩。<br />挑一个喜欢的方向，再慢慢调成你的作品。</p>
+          <div class="import-process" aria-label="修图流程">
+            <div><span>01</span><strong>读懂照片</strong><p>分析光影、色彩与画面</p></div>
+            <div><span>02</span><strong>挑选风格</strong><p>比较三种后期方向</p></div>
+            <div><span>03</span><strong>调到喜欢</strong><p>用文字继续微调成片</p></div>
+          </div>
+        </div>
+        <form id="drop" class="drop" tabindex="0" aria-label="导入照片，点击或拖放文件">
           <input id="file" type="file" accept=".jpg,.jpeg,.png,.tif,.tiff,.arw,.cr2,.cr3,.nef,.dng,.raf,.orf,.rw2,.pef,.srw,.raw" hidden />
-          <p class="kicker">把一张照片放进来</p>
-          <h1>先看缺陷，再选路线与仿色风格</h1>
-          <p class="lede">
-            先读影调、色调和画面目的，再判断适合的后期路线与名人风格；A/B/C 三套方案都由 LightCraft 完成后期与导出，完成后再由你选择。
-          </p>
-          <button type="button" class="btn primary" id="pick">选择文件</button>
-          <p class="hint">支持 JPEG / TIFF / PNG / 常见 RAW · 单张不超过 80MB</p>
+          <div class="upload-symbol" aria-hidden="true"><svg viewBox="0 0 64 64" fill="none"><rect x="9" y="9" width="46" height="46" rx="8" stroke="currentColor" stroke-width="1.5"/><circle cx="24" cy="24" r="4" stroke="currentColor" stroke-width="1.5"/><path d="m10 45 15-12 10 8 9-7 11 9M45 4v12M39 10h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+          <h2>从一张照片开始</h2>
+          <p class="drop-instruction">拖放照片到这里，或从文件中选择</p>
+          <button type="button" class="btn primary" id="pick">选择照片 <span aria-hidden="true">↗</span></button>
+          <p class="hint">JPEG · PNG · TIFF · 常见 RAW <span>单张 ≤ 80 MB</span></p>
+          <p class="lede">先分析照片，再生成三套修图方案。完成后可以继续微调。</p>
         </form>
+        <div class="import-foot"><span>保留原片，每一次调整都有迹可循。</span><span>YOUR PHOTO. YOUR PERSPECTIVE.</span></div>
       </section>
 
-      <section id="work-stage" class="stage hidden">
+      <section id="work-stage" class="stage hidden" aria-live="polite">
         <div class="progress-card" id="progress-card">
+          <div class="progress-art"><img id="processing-preview" class="hidden" alt="正在处理的照片" /><span class="processing-orbit" aria-hidden="true"></span><span>正在寻找照片的另一种可能</span></div>
           <div class="progress-copy">
-            <p class="kicker" id="progress-kicker">处理中</p>
-            <h2 id="progress-title">正在读取底片</h2>
+            <p class="eyebrow" id="progress-kicker">IN THE MAKING</p>
+            <h2 id="progress-title">正在读取照片</h2>
             <p id="progress-file" class="filename"></p>
+            <p class="progress-note">每套方案会独立调整并检查画质，可能需要几分钟。</p>
+            <ol class="steps" id="steps">
+              <li data-step="connect">准备引擎</li><li data-step="ingest">读取照片</li>
+              <li data-step="analyze">技术分析</li><li data-step="restore">画质修复</li>
+              <li data-step="critique">照片诊断</li><li data-step="render">规划方案</li>
+              <li data-step="qa">检查配方</li><li data-step="lightroom">调色出片</li>
+            </ol>
+            <p class="progress-note">上传完成后，处理进度会自动保存。</p>
           </div>
-          <ol class="steps" id="steps">
-            <li data-step="connect">连接</li>
-            <li data-step="ingest">读取</li>
-            <li data-step="analyze">分析</li>
-            <li data-step="restore">修复</li>
-            <li data-step="critique">诊断</li>
-            <li data-step="render">配方</li>
-            <li data-step="qa">自检</li>
-            <li data-step="lightroom">LightCraft</li>
-          </ol>
         </div>
       </section>
 
       <section id="result-stage" class="stage hidden">
         <div class="result-grid">
-          <aside class="diag">
-            <div class="panel">
-              <p class="kicker">原片</p>
-              <figure class="orig">
-                <img id="orig-img" alt="未处理预览" />
-              </figure>
-              <p class="filename" id="orig-name"></p>
-            </div>
-            <div class="panel">
-              <p class="kicker">诊断</p>
-              <h2 id="summary"></h2>
-              <p class="genre" id="genre"></p>
-              <ul class="issues" id="issues"></ul>
-              <div class="chips" id="tech-chips"></div>
-              <div class="donot" id="donot"></div>
-            </div>
-            <div class="panel route-panel">
-              <p class="kicker">读图卡与路线</p>
-              <dl class="read-card">
-                <div><dt>影调</dt><dd id="tone-card"></dd></div>
-                <div><dt>色调</dt><dd id="color-card"></dd></div>
-                <div><dt>目的</dt><dd id="purpose-card"></dd></div>
-              </dl>
-              <div class="route-choice">
-                <span>推荐路线</span>
-                <h3 id="route-title"></h3>
-                <p id="route-reason"></p>
-              </div>
-              <div class="manual-gaps" id="manual-gaps"></div>
-            </div>
-          </aside>
-
-          <section class="studio">
+          <section class="studio" aria-label="照片预览与方案选择">
             <div class="studio-head">
-              <div>
-                <p class="kicker" id="result-count">后期成片</p>
-                <h2>挑选喜欢的，也告诉我们哪些不合心意</h2>
-              </div>
-              <p class="taste" id="taste"></p>
+              <div class="photo-title"><span class="file-symbol" aria-hidden="true">▧</span><h1 id="orig-name"></h1><span class="saved-badge">已保存</span></div>
+              <div class="view-switch" role="group" aria-label="预览方式"><button type="button" id="view-single" class="active" aria-pressed="true">单图</button><button type="button" id="view-compare" aria-pressed="false">并排对比</button></div>
             </div>
-            <div class="hero-compare" id="hero-compare">
-              <figure>
-                <img id="hero-orig" alt="原片" />
-                <figcaption id="hero-before-label">原片</figcaption>
-              </figure>
-              <figure>
-                <img id="hero-edit" alt="后期" />
-                <figcaption>
-                  <span id="hero-label">方案</span>
-                  <button type="button" class="hold-orig" id="hold-orig">按住看原片</button>
-                </figcaption>
-              </figure>
+            <div class="hero-compare" id="hero-compare" tabindex="0" aria-label="照片预览，按住空格查看调整前效果">
+              <figure class="before-figure"><img id="hero-orig" alt="调整前的照片" /><figcaption id="hero-before-label">原片</figcaption></figure>
+              <figure class="edit-figure"><img id="hero-edit" alt="当前选中的成片" /><figcaption><span id="hero-label">方案</span></figcaption></figure>
             </div>
-            <p class="compare-hint">每张都可以标记满意或不满意，再次点击可撤销。不评价的图不会影响偏好。选中一张，还能输入意见继续微调。</p>
+            <div class="canvas-footer"><span class="canvas-hint">按 <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> 切换方案 <span class="hint-divider">/</span> 按住空格对比</span><button type="button" class="hold-orig" id="hold-orig">按住看原片</button></div>
+            <div class="filmstrip-head"><p class="kicker" id="result-count">后期成片</p><span>选择你的方向</span></div>
             <div class="variants" id="variants"></div>
             <p class="compare-hint hidden" id="delivery-note"></p>
-            <div class="judge hidden" id="judge">
-            </div>
+            <p class="taste" id="taste"></p>
           </section>
+
+          <aside class="inspector" aria-label="照片调整面板">
+            <div class="inspector-tabs" role="tablist" aria-label="工作面板"><button type="button" id="tab-edit" role="tab" aria-selected="true" aria-controls="edit-panel" tabindex="0">调整与导出</button><button type="button" id="tab-info" role="tab" aria-selected="false" aria-controls="info-panel" tabindex="-1">照片分析</button></div>
+            <div id="edit-panel" role="tabpanel" aria-labelledby="tab-edit">
+              <div class="judge hidden" id="judge"></div>
+              <details class="selected-details"><summary>方案说明与调整细节</summary><div id="selected-details"></div></details>
+              <p class="inspector-footnote">原片始终保留，可随时切回之前的版本。</p>
+            </div>
+            <div id="info-panel" class="diag hidden" role="tabpanel" aria-labelledby="tab-info">
+              <div class="panel source-panel"><figure class="orig"><img id="orig-img" alt="原片缩略图" /></figure><div><p class="kicker">照片档案</p><p class="genre" id="genre"></p></div></div>
+              <div class="panel"><p class="kicker">观察与建议</p><h2 id="summary"></h2><ul class="issues" id="issues"></ul><div class="chips" id="tech-chips"></div><div class="donot" id="donot"></div></div>
+              <div class="panel route-panel"><p class="kicker">光影与色彩</p><dl class="read-card"><div><dt>影调</dt><dd id="tone-card"></dd></div><div><dt>色调</dt><dd id="color-card"></dd></div><div><dt>目的</dt><dd id="purpose-card"></dd></div></dl><div class="route-choice"><span>推荐方向</span><h3 id="route-title"></h3><p id="route-reason"></p></div><div class="manual-gaps" id="manual-gaps"></div></div>
+            </div>
+          </aside>
         </div>
       </section>
 
       <section id="error-stage" class="stage hidden">
-        <div class="panel error-panel">
-          <p class="kicker">没有跑通</p>
-          <h2 id="error-title">处理失败</h2>
-          <p id="error-body"></p>
-          <button class="btn primary hidden" id="error-retry">重试这张照片</button>
-          <button class="btn" id="error-reset">重新选照片</button>
-        </div>
+        <div class="panel error-panel"><span class="error-symbol" aria-hidden="true">!</span><p class="kicker">处理遇到问题</p><h2 id="error-title">处理失败</h2><p id="error-body"></p><div class="judge-actions"><button class="btn primary hidden" id="error-retry">重试这张照片</button><button class="btn ghost" id="error-reset">重新选照片</button></div></div>
       </section>
     </main>
-    <script src="./app.js?v=18"></script>
+
+    <dialog id="vision-dialog" class="vision-dialog" aria-labelledby="vision-title">
+      <div class="vision-head">
+        <div><span class="eyebrow">PRIVATE VAULT</span><h2 id="vision-title">视觉模型</h2></div>
+        <button type="button" class="btn ghost" id="vision-close" aria-label="关闭">关闭</button>
+      </div>
+      <p class="vision-note">密钥、服务地址和模型名用你的口令加密保存在本机，只在客户端运行时解锁到内存。日志、任务记录、接口和其他程序只能看到「视觉模型 1、2…」这样的编号。API Key 保存后不会再显示。口令无法找回。</p>
+      <div id="vision-body"></div>
+      <p id="vision-error" class="vision-error" role="alert"></p>
+    </dialog>
+    <script src="./app.js?v=21"></script>
   </body>
 </html>

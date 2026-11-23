@@ -44,8 +44,8 @@ def main():
         variants = get_variants(source_conn, str(args.job_id))
     source = source_data / "jobs" / str(args.job_id)
     if args.recover_sidecars and saved and saved["status"] == "error" and not variants:
-        for plan in json.loads((source / "plan.json").read_text()):
-            sidecar = json.loads((source / f"variant_{plan['slot']}.json").read_text())
+        for plan in json.loads((source / "plan.json").read_text(encoding="utf-8")):
+            sidecar = json.loads((source / f"variant_{plan['slot']}.json").read_text(encoding="utf-8"))
             recipe = sidecar["recipe"]
             recipe.update(intent=plan["intent"], style_workflow={"method_id": plan.get("method_id")})
             variants.append({"slot": plan["slot"], "look_id": sidecar["look_id"],
@@ -60,7 +60,7 @@ def main():
     variants = [row for row in variants if row["slot"] in args.slots]
     if args.initial_recipes:
         for row in variants:
-            audit = json.loads((source / "lightroom-audits" / f"variant_{row['slot']}.json").read_text())
+            audit = json.loads((source / "lightroom-audits" / f"variant_{row['slot']}.json").read_text(encoding="utf-8"))
             initial = audit["rounds"][0]["recipe"]
             payload = json.loads(row["recipe_json"])
             payload.update(initial)
@@ -70,9 +70,9 @@ def main():
         from superphoto.models import TechnicalReport
         from superphoto.preference import build_plans
         from superphoto.pipeline import _professionalize_recipe
-        critique = Critique.model_validate_json((source / "critique.json").read_text())
-        technical = TechnicalReport.model_validate_json((source / "technical.json").read_text())
-        old_plans = json.loads((source / "plan.json").read_text())
+        critique = Critique.model_validate_json((source / "critique.json").read_text(encoding="utf-8"))
+        technical = TechnicalReport.model_validate_json((source / "technical.json").read_text(encoding="utf-8"))
+        old_plans = json.loads((source / "plan.json").read_text(encoding="utf-8"))
         rebuilt = build_plans([p["look_id"] for p in old_plans], critique, technical)
         for plan in rebuilt:
             plan.recipe = _professionalize_recipe(plan.recipe, technical, plan.geometry)
@@ -82,7 +82,7 @@ def main():
             payload.update(plan.recipe.model_dump(), intent=plan.intent.model_dump())
             row["recipe_json"] = json.dumps(payload, ensure_ascii=False)
     if args.skip_unconfirmed_subject:
-        intent = json.loads((source / "critique.json").read_text())["intent"]
+        intent = json.loads((source / "critique.json").read_text(encoding="utf-8"))["intent"]
         if intent.get("subject_confidence") != 0 or intent.get("subject_box") is not None:
             raise ValueError("Saved critique does not explicitly report an unconfirmed subject")
         for row in variants:
@@ -124,7 +124,7 @@ def main():
         if args.redesign:
             run_job(settings, conn, new_id, original)
         else:
-            critique = Critique.model_validate_json((root / "critique.json").read_text())
+            critique = Critique.model_validate_json((root / "critique.json").read_text(encoding="utf-8"))
             _render_variants_with_lightroom(settings, conn, new_id, original, root, variants, critique=critique)
         update_job(conn, new_id, status="ready", step="ready", error=None)
         print(json.dumps({"job_id": new_id, "status": "ready", "dir": str(root)}, ensure_ascii=False), flush=True)

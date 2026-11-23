@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +63,7 @@ def semantic_status(settings: Settings) -> dict[str, Any]:
         "enabled": True,
         "available": cached,
         "model": settings.semantic_model,
-        "reason": None if cached else "模型首次下载尚未完成，当前使用基础分区",
+        "reason": None if cached else "未找到本地模型缓存，当前使用基础分区；请预先下载分割模型",
     }
 
 
@@ -75,16 +77,12 @@ def segment_scene(srgb: np.ndarray, settings: Settings) -> SemanticMasks | None:
         inputs = processor(images=image, return_tensors="pt")
         with torch.inference_mode():
             logits = model(**inputs).logits
-            logits = torch.nn.functional.interpolate(
-                logits,
-                size=srgb.shape[:2],
-                mode="bilinear",
-                align_corners=False,
-            )
+            # Keep the class tensor at model resolution. Upsampling 150 channels
+            # to 2048px before softmax consumed several GiB on small NAS hosts.
             probs = torch.softmax(logits, dim=1)[0]
             confidence, labels = torch.max(probs, dim=0)
-        label_map = labels.cpu().numpy()
-        conf = confidence.cpu().numpy().astype(np.float32)
+        label_map, conf = _resize_predictions(labels.cpu().numpy(),
+                                             confidence.cpu().numpy(), srgb.shape[:2])
         id2label = {int(k): str(v).lower() for k, v in model.config.id2label.items()}
 
         subject = _labels_mask(label_map, id2label, _SUBJECT_WORDS)
@@ -123,19 +121,36 @@ def _load_model(model_name: str):
     return processor, model, torch
 
 
+def _resize_predictions(labels: np.ndarray, confidence: np.ndarray,
+                        shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    height, width = shape
+    label_map = np.asarray(Image.fromarray(labels.astype(np.int32)).resize(
+        (width, height), Image.Resampling.NEAREST))
+    conf = np.asarray(Image.fromarray(confidence.astype(np.float32)).resize(
+        (width, height), Image.Resampling.BILINEAR), dtype=np.float32)
+    return label_map, conf
+
+
 def _model_cached(model_name: str) -> bool:
-    slug = "models--" + model_name.replace("/", "--")
-    cache = Path.home() / ".cache" / "huggingface" / "hub" / slug / "snapshots"
-    if not cache.is_dir():
-        return False
-    for snapshot in cache.iterdir():
-        if not snapshot.is_dir():
+    home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+    hub = Path(os.environ.get("HF_HUB_CACHE", os.environ.get("HUGGINGFACE_HUB_CACHE", home / "hub")))
+    local = Path(model_name)
+    cache = hub / ("models--" + model_name.replace("/", "--")) / "snapshots"
+    snapshots = [local] if local.is_dir() else list(cache.iterdir()) if cache.is_dir() else []
+    for snapshot in snapshots:
+        if not (snapshot / "config.json").is_file() or not (snapshot / "preprocessor_config.json").is_file():
             continue
-        has_config = (snapshot / "config.json").is_file()
-        has_processor = (snapshot / "preprocessor_config.json").is_file()
-        has_weights = (snapshot / "model.safetensors").is_file() or (snapshot / "pytorch_model.bin").is_file()
-        if has_config and has_processor and has_weights:
+        if (snapshot / "model.safetensors").is_file() or (snapshot / "pytorch_model.bin").is_file():
             return True
+        for filename in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+            index = snapshot / filename
+            if index.is_file():
+                try:
+                    shards = set(json.loads(index.read_text(encoding="utf-8"))["weight_map"].values())
+                    if shards and all((snapshot / shard).is_file() for shard in shards):
+                        return True
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
     return False
 
 

@@ -9,6 +9,7 @@ assistant can show them without knowing the server's data directory.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import uuid
@@ -31,7 +32,11 @@ class AgentError(Exception):
 
 
 def output_root() -> Path:
-    return Path.home() / "Library" / "Application Support" / "SuperPhoto" / "agent"
+    if sys.platform == "win32":
+        return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "SuperPhoto" / "agent"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "SuperPhoto" / "agent"
+    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "superphoto" / "agent"
 
 
 def file_stem(slot: str, title: str) -> str:
@@ -51,6 +56,7 @@ class SuperPhotoClient:
         client: httpx.Client | None = None,
         out_dir: Path | None = None,
         poll_seconds: float = 2.0,
+        access_token: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.out_dir = out_dir or output_root()
@@ -59,6 +65,7 @@ class SuperPhotoClient:
         self._client = client or httpx.Client(
             base_url=self.base_url,
             trust_env=False,
+            headers={"Authorization": f"Bearer {access_token}"} if access_token else {},
             timeout=httpx.Timeout(120.0, connect=3.0),
         )
 
@@ -304,7 +311,8 @@ class SuperPhotoClient:
 
 def default_client() -> SuperPhotoClient:
     settings = get_settings()
-    return SuperPhotoClient(f"http://{settings.host}:{settings.port}")
+    host = "127.0.0.1" if settings.host in {"0.0.0.0", "::"} else settings.host
+    return SuperPhotoClient(f"http://{host}:{settings.port}", access_token=settings.access_token)
 
 
 def run_agent(args: Any) -> None:

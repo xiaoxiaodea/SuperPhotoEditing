@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import hmac
 import json
+import os
+import secrets
 import shutil
+import time
 import sqlite3
 import threading
 import uuid
@@ -9,8 +15,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
+
+from .tasks import TaskWorker, enqueue_source
 from fastapi.staticfiles import StaticFiles
 
 from .config import Settings, get_settings
@@ -32,7 +40,8 @@ from .darktable_export import darktable_cli_path
 from .ingest import ALLOWED_EXTS, source_kind
 from .lightroom import LightroomError, connect_lightroom, install_lightroom_plugin, lightroom_status
 from .models import FeedbackIn, RatingIn, RefinementIn
-from .ollama import probe
+from .vision import get_vision_status
+from .vault_routes import build_router as build_vault_router, publish_bridge, retract_bridge
 from .pipeline import run_job
 from .preference import describe_taste
 from .recipes import LOOKS
@@ -61,6 +70,9 @@ _state: dict[str, Any] = {}
 
 
 def reset_runtime() -> None:
+    worker = _state.get("task_worker")
+    if worker is not None:
+        worker.stop()
     with _lock:
         for conn in _state.get("connections", {}).values():
             conn.close()
@@ -75,10 +87,6 @@ def _boot() -> tuple[Settings, sqlite3.Connection]:
             settings.jobs_dir.mkdir(parents=True, exist_ok=True)
             conn = connect(settings.db_path)
             init_db(conn)
-            conn.execute("""UPDATE refinements SET status='error', step='error',
-                error='应用在微调完成前关闭了。调整前版本已保留，可以重新提交意见。'
-                WHERE status IN ('queued', 'running')""")
-            conn.commit()
             _state["settings"] = settings
             _state["connections"] = {threading.get_ident(): conn}
         # FastAPI status, feedback and processing workers run concurrently.
@@ -94,11 +102,108 @@ def _boot() -> tuple[Settings, sqlite3.Connection]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _boot()
-    yield
+    settings, _ = _boot()
+    worker = TaskWorker(settings.db_path, settings.jobs_dir,
+                        lambda job_id, original: _safe_run(job_id, original),
+                        lambda refinement_id: _safe_refine(refinement_id))
+    worker.start()
+    _state["task_worker"] = worker
+    publish_bridge(settings)
+    try:
+        yield
+    finally:
+        retract_bridge()
+        await asyncio.to_thread(worker.stop)
+        _state.pop("task_worker", None)
+
+
+def _wake_worker() -> None:
+    worker = _state.get("task_worker")
+    if worker is not None:
+        worker.wake()
 
 
 app = FastAPI(title="SuperPhoto", lifespan=lifespan)
+
+_SESSION_COOKIE = "superphoto_session"
+_SESSION_SECONDS = 12 * 60 * 60
+_SESSION_SECRET = secrets.token_bytes(32)
+
+
+def _access_token() -> str:
+    return os.environ.get("SUPERPHOTO_ACCESS_TOKEN", getattr(_s(), "access_token", "")).strip()
+
+
+def _session_signature(stamp: str, token: str) -> str:
+    return hmac.new(_SESSION_SECRET, f"{stamp}:{token}".encode(), hashlib.sha256).hexdigest()
+
+
+def _authenticated(request: Request, token: str) -> bool:
+    authorization = request.headers.get("authorization")
+    if authorization:
+        scheme, _, supplied = authorization.partition(" ")
+        return scheme.lower() == "bearer" and hmac.compare_digest(supplied.encode(), token.encode())
+    cookie = request.cookies.get(_SESSION_COOKIE, "")
+    stamp, _, signature = cookie.partition(".")
+    try:
+        age = time.time() - int(stamp)
+    except ValueError:
+        return False
+    return (0 <= age <= _SESSION_SECONDS and
+            hmac.compare_digest(signature.encode(), _session_signature(stamp, token).encode()))
+
+
+@app.middleware("http")
+async def access_control(request: Request, call_next):
+    token = _access_token()
+    path = request.url.path
+    protected = path == "/api" or path.startswith("/api/") or path == "/media" or path.startswith("/media/")
+    public = path in {"/api/auth/status", "/api/auth/login"}
+    if token and protected and not public:
+        if not _authenticated(request, token):
+            return JSONResponse({"detail": "需要登录或提供 Bearer token"}, status_code=401,
+                                headers={"WWW-Authenticate": "Bearer"})
+        # Cookies must not authorize cross-origin writes. Bearer requests do
+        # not rely on ambient browser credentials and do not need this check.
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and not request.headers.get("authorization"):
+            origin = request.headers.get("origin")
+            if origin and origin != str(request.base_url).rstrip("/"):
+                return JSONResponse({"detail": "拒绝跨站请求"}, status_code=403)
+    response = await call_next(request)
+    if protected:
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/api/auth/status")
+def auth_status(request: Request) -> dict[str, bool]:
+    token = _access_token()
+    return {"required": bool(token), "authenticated": not token or _authenticated(request, token)}
+
+
+@app.post("/api/auth/login")
+def auth_login(request: Request, body: dict = Body(...)) -> JSONResponse:
+    token = _access_token()
+    supplied = body.get("token")
+    if token and (not isinstance(supplied, str) or not hmac.compare_digest(supplied.encode(), token.encode())):
+        raise HTTPException(401, "访问口令不正确", headers={"WWW-Authenticate": "Bearer"})
+    origin = request.headers.get("origin")
+    if origin and origin != str(request.base_url).rstrip("/"):
+        raise HTTPException(403, "拒绝跨站请求")
+    response = JSONResponse({"ok": True})
+    if token:
+        stamp = str(int(time.time()))
+        response.set_cookie(_SESSION_COOKIE, f"{stamp}.{_session_signature(stamp, token)}",
+                            max_age=_SESSION_SECONDS, httponly=True, samesite="strict",
+                            secure=request.url.scheme == "https", path="/")
+    return response
+
+
+@app.post("/api/auth/logout")
+def auth_logout() -> JSONResponse:
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(_SESSION_COOKIE, path="/")
+    return response
 
 
 def _s() -> Settings:
@@ -109,6 +214,9 @@ def _c() -> sqlite3.Connection:
     return _boot()[1]
 
 
+app.include_router(build_vault_router(_s))
+
+
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     settings = _s()
@@ -117,22 +225,22 @@ def health() -> dict[str, Any]:
         import rawpy  # noqa: F401
     except ImportError:
         rawpy_ok = False
-    ollama = probe(settings)
-    if ollama.get("ready"):
-        critic = "ollama"
-        critic_model = ollama.get("resolved_model")
-    elif settings.xai_api_key:
-        critic = "grok"
-        critic_model = settings.xai_model
-    else:
-        critic = "local"
-        critic_model = None
+    vision = get_vision_status(settings, check_ollama=True)
+    provider = vision["provider"]
+    critic = "grok" if provider == "xai" else provider
+    critic_model = vision["model"]
+    local_candidate = next((candidate for candidate in vision["candidates"]
+                            if candidate["provider"] == "ollama"), None)
+    ollama = {"ok": local_candidate is not None, "ready": local_candidate is not None,
+              "model": settings.ollama_model,
+              "resolved_model": local_candidate["model"] if local_candidate else None}
     semantic = semantic_status(settings)
     lr_status = lightroom_status(settings.lightroom_enabled, settings.lightcraft_bin)
     return {
         "ok": True,
         "critic": critic,
         "critic_model": critic_model,
+        "vision": vision,
         "ollama": ollama,
         "grok": bool(settings.xai_api_key),
         "model": settings.xai_model if settings.xai_api_key else None,
@@ -196,7 +304,6 @@ def preferences() -> dict[str, Any]:
 
 @app.post("/api/jobs")
 async def create_job(
-    background: BackgroundTasks,
     file: UploadFile = File(...),
 ) -> dict[str, str]:
     settings = _s()
@@ -205,24 +312,35 @@ async def create_job(
     ext = Path(name).suffix.lower()
     if ext not in ALLOWED_EXTS:
         raise HTTPException(400, f"unsupported file type: {ext or 'none'}")
-    data = await file.read()
     max_bytes = settings.max_upload_mb * 1024 * 1024
-    if len(data) > max_bytes:
-        raise HTTPException(400, f"file larger than {settings.max_upload_mb} MB")
-    if not data:
-        raise HTTPException(400, "empty file")
-
     job_id = str(uuid.uuid4())
     folder = job_dir(settings, job_id)
     original = folder / f"original{ext}"
-    original.write_bytes(data)
-    insert_job(conn, job_id, name)
-    background.add_task(_safe_run, job_id, original)
+    try:
+        size = 0
+        with original.open("wb") as output:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > max_bytes:
+                    raise HTTPException(400, f"file larger than {settings.max_upload_mb} MB")
+                output.write(chunk)
+            if not size:
+                raise HTTPException(400, "empty file")
+            output.flush()
+            os.fsync(output.fileno())
+        # Publish queued only after the complete source has reached disk.
+        insert_job(conn, job_id, name, original.name)
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    finally:
+        await file.close()
+    _wake_worker()
     return {"id": job_id, "kind": source_kind(original)}
 
 
 @app.post("/api/jobs/{job_id}/retry")
-def retry_job(job_id: str, background: BackgroundTasks) -> dict[str, str]:
+def retry_job(job_id: str) -> dict[str, str]:
     settings, conn = _boot()
     saved = get_job(conn, job_id)
     if not saved:
@@ -234,21 +352,17 @@ def retry_job(job_id: str, background: BackgroundTasks) -> dict[str, str]:
     source = settings.jobs_dir / job_id / filename
     if not source.is_file():
         raise HTTPException(410, "原片已不在本机，请重新选择照片")
-    new_id = str(uuid.uuid4())
-    original = job_dir(settings, new_id) / filename
-    shutil.copy2(source, original)
-    insert_job(conn, new_id, name)
-    background.add_task(_safe_run, new_id, original)
-    return {"id": new_id, "kind": source_kind(original)}
+    try:
+        result = enqueue_source(settings, conn, source, original_name=name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    _wake_worker()
+    return result
 
 
 def _safe_run(job_id: str, original: Path) -> None:
     settings, conn = _boot()
-    try:
-        run_job(settings, conn, job_id, original)
-    except Exception:
-        # run_job already records the error
-        pass
+    run_job(settings, conn, job_id, original)
 
 
 @app.get("/api/jobs/latest")
@@ -335,7 +449,7 @@ def _public_refinement(record: dict) -> dict:
 
 
 @app.post("/api/jobs/{job_id}/refinements", status_code=202)
-def create_refinement(job_id: str, body: RefinementIn, background: BackgroundTasks) -> dict:
+def create_refinement(job_id: str, body: RefinementIn) -> dict:
     settings, conn = _boot()
     job, _ = _ready_variant(conn, job_id, body.slot)
     refinement_id = str(body.request_id)
@@ -361,8 +475,9 @@ def create_refinement(job_id: str, body: RefinementIn, background: BackgroundTas
         except sqlite3.IntegrityError as exc:
             conn.rollback()
             raise HTTPException(409, "这张图已有微调正在处理，请等它完成后再提交") from exc
-    background.add_task(_safe_refine, refinement_id)
-    return _public_refinement(get_refinement(conn, refinement_id))
+    record = get_refinement(conn, refinement_id)
+    _wake_worker()
+    return _public_refinement(record)
 
 
 def _safe_refine(refinement_id: str) -> None:

@@ -293,27 +293,22 @@ def test_checkpoint_uses_explicit_sorted_setting_allowlist(tmp_path: Path) -> No
     assert client.arguments["settings"] == ["Exposure2012", "Texture"]
 
 
-def test_lightcraft_render_translates_sliders_and_writes_the_jpeg(tmp_path: Path) -> None:
+def test_lightcraft_render_translates_sliders_and_writes_the_jpeg(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "photo.jpg"
     source.write_bytes(b"source-bytes")
     cli = tmp_path / "lightcraft-cli"
-    cli.write_text(
-        """#!/usr/bin/env python3
-import sys
-from pathlib import Path
-args = sys.argv[1:]
-if args and args[0] == "--version":
-    print("lightcraft-cli 0.21.1")
-    raise SystemExit(0)
-output = Path(args[args.index("-o") + 1])
-settings = Path(args[args.index("--settings") + 1]).read_text()
-assert '"exposure": 0.4' in settings
-assert '"kind": "sky"' in settings
-output.write_bytes(b"rendered")
-""",
-        encoding="utf-8",
-    )
-    cli.chmod(0o755)
+    from subprocess import CompletedProcess
+
+    def render(command, **kwargs):
+        assert command[:2] == [str(cli), "render"]
+        assert command[2] == str(source)
+        settings = Path(command[command.index("--settings") + 1]).read_text(encoding="utf-8")
+        assert '"exposure": 0.4' in settings
+        assert '"kind": "sky"' in settings
+        Path(command[command.index("-o") + 1]).write_bytes(b"rendered")
+        return CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("superphoto.lightcraft.subprocess.run", render)
     client = LightCraftClient(cli)
     client.call_tool("set_develop_settings", {"photo_id": str(source), "settings": {"Exposure2012": 0.4}})
     client.call_tool("apply_ai_mask", {
@@ -329,7 +324,7 @@ output.write_bytes(b"rendered")
         "height": 1600,
     })
     assert (destination / "render.jpg").read_bytes() == b"rendered"
-    document = json.loads((destination / "develop.json").read_text())
+    document = json.loads((destination / "develop.json").read_text(encoding="utf-8"))
     assert document["light"]["exposure"] == 0.4
     assert document["masks"][0]["adjust"]["exposure"] == -0.2
     assert document["masks"][0]["adjust"]["dehaze"] == 8
@@ -376,12 +371,13 @@ def test_apply_professional_recipe_falls_back_when_preview_handler_is_not_loaded
     assert Path(result["export"]).read_bytes() == b"jpeg"
 
 
-def test_unknown_tool_and_failed_render_are_actionable(tmp_path: Path) -> None:
+def test_unknown_tool_and_failed_render_are_actionable(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "photo.jpg"
     source.write_bytes(b"source")
     cli = tmp_path / "lightcraft-cli"
-    cli.write_text("#!/bin/sh\necho 'decoder rejected the file' >&2\nexit 1\n", encoding="utf-8")
-    cli.chmod(0o755)
+    from subprocess import CompletedProcess
+    monkeypatch.setattr("superphoto.lightcraft.subprocess.run",
+                        lambda command, **kwargs: CompletedProcess(command, 1, "", "decoder rejected the file"))
     client = LightCraftClient(cli)
     with pytest.raises(LightroomError, match="不支持工具"):
         client.call_tool("get_selected_photos")

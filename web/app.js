@@ -10,6 +10,8 @@ const state = {
   refinementRequest: null,
   versions: {},
   drafts: {},
+  lightcraftEnabled: null,
+  previewUrl: null,
 };
 
 const STEP_COPY = {
@@ -22,7 +24,7 @@ const STEP_COPY = {
   render: "正在选择路线并生成三套配方",
   qa: "正在自检配方",
   lightroom: "LightCraft 正在调色并检查成片",
-  ready: "LightCraft 成片已完成，可以挑选了",
+  ready: "成片已完成，可以挑选了",
   error: "处理失败",
 };
 
@@ -30,8 +32,45 @@ init();
 
 async function init() {
   bind();
-  refreshHealth();
-  await restoreJob();
+  try {
+    await ensureAuthenticated();
+    await refreshHealth();
+    await restoreJob();
+  } catch (err) {
+    $("health").textContent = err.message || "无法连接服务";
+  }
+}
+
+async function ensureAuthenticated() {
+  const response = await fetch("/api/auth/status", {cache: "no-store"});
+  if (!response.ok) throw new Error("无法检查登录状态");
+  const status = await response.json();
+  if (!status.required || status.authenticated) return;
+  document.querySelector("main").classList.add("hidden");
+  $("auth-stage").classList.remove("hidden");
+  $("auth-token").focus();
+  await new Promise((resolve) => {
+    $("auth-form").onsubmit = async (event) => {
+      event.preventDefault();
+      const button = event.target.querySelector("button");
+      button.disabled = true;
+      $("auth-error").textContent = "";
+      try {
+        const login = await fetch("/api/auth/login", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({token: $("auth-token").value}),
+        });
+        if (!login.ok) throw new Error("令牌无效，请重新输入");
+        $("auth-token").value = "";
+        $("auth-stage").classList.add("hidden");
+        document.querySelector("main").classList.remove("hidden");
+        $("auth-form").onsubmit = null;
+        resolve();
+      } catch (error) {
+        $("auth-error").textContent = error.message;
+      } finally { button.disabled = false; }
+    };
+  });
 }
 
 function rememberJob(id) {
@@ -61,32 +100,59 @@ async function restoreJob() {
 }
 
 function bind() {
-  // Build the new panel here so a pre-upgrade document can use this script too.
   $("judge").innerHTML = `
-    <p class="kicker">保留喜欢的方向，再调到合心意</p>
-    <h3 id="refine-title">微调这张成片</h3>
-    <label class="version-label" for="refine-version">查看版本</label>
+    <p class="kicker">当前方案</p>
+    <h2 id="refine-title">微调这张成片</h2>
+    <div class="version-row"><label class="version-label" for="refine-version">成片版本</label><span class="version-label">可随时切换</span></div>
     <select id="refine-version"></select>
-    <a id="version-download" class="version-download" download>下载当前成片</a>
-    <p class="feedback-hint" id="refine-base"></p>
-    <label for="notes">想改哪里？直接说就好</label>
-    <textarea id="notes" rows="3" maxlength="1000" placeholder="例如：整体亮一点，保留现在的暖色。或：主体亮一点，背景暗一点。"></textarea>
-    <p class="feedback-hint">LightCraft 会在当前版本上继续调整。完成后可对照微调前后，也可随时切回之前的版本。</p>
-    <div class="judge-actions">
-      <button type="button" class="btn primary" id="refine-submit">让 LightCraft 微调这张</button>
-      <button type="button" class="btn ghost" id="again">再来一张</button>
+    <a id="version-download" class="btn primary version-download" download>下载当前成片 <span aria-hidden="true">↓</span></a>
+    <div class="refine-section">
+      <label for="notes">还想做一点调整？</label>
+      <textarea id="notes" rows="4" maxlength="1000" placeholder="说说你想要的效果，例如：主体亮一点，保留现在的暖色。"></textarea>
+      <div class="prompt-suggestions" aria-label="微调建议"><button type="button" data-prompt="整体亮一点，保留现在的暖色">整体亮一点</button><button type="button" data-prompt="主体亮一点，背景暗一点">突出主体</button><button type="button" data-prompt="饱和度低一点">降低饱和度</button></div>
+      <p class="feedback-hint" id="refine-base"></p>
+      <button type="button" class="btn ghost" id="refine-submit">开始微调 <span aria-hidden="true">↗</span></button>
+      <p id="refine-status" role="status" aria-live="polite"></p>
+      <div id="refine-history"></div>
     </div>
-    <p id="refine-status" role="status" aria-live="polite"></p>
-    <div id="refine-history"></div>`;
+    <button type="button" class="btn ghost" id="again">导入下一张照片</button>`;
+  $("new-photo").addEventListener("click", reset);
+  $("vision-open").addEventListener("click", openVisionDialog);
+  $("vision-close").addEventListener("click", () => $("vision-dialog").close());
+  $("vision-dialog").addEventListener("close", () => { $("vision-body").innerHTML = ""; refreshHealth(); });
+  $("view-single").addEventListener("click", () => setCompareView(false));
+  $("view-compare").addEventListener("click", () => setCompareView(true));
+  ["edit", "info"].forEach(name => {
+    const tab = $(`tab-${name}`);
+    tab.addEventListener("click", () => selectInspector(name));
+    tab.addEventListener("keydown", event => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const next = event.key === "Home" ? "edit" : event.key === "End" ? "info" : name === "edit" ? "info" : "edit";
+      selectInspector(next);
+      $(`tab-${next}`).focus();
+    });
+  });
+  document.querySelectorAll("[data-prompt]").forEach(button => {
+    button.addEventListener("click", () => {
+      $("notes").value = button.dataset.prompt;
+      $("notes").dispatchEvent(new Event("input"));
+      $("notes").focus();
+    });
+  });
   const drop = $("drop");
   const file = $("file");
   $("pick").addEventListener("click", () => file.click());
+  drop.addEventListener("submit", event => event.preventDefault());
   drop.addEventListener("click", (e) => {
-    if (e.target.closest("button")) return;
+    if (e.target.closest("button, input")) return;
     file.click();
   });
   drop.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") file.click();
+    if (e.target === drop && (e.key === "Enter" || e.key === " ")) {
+      e.preventDefault();
+      file.click();
+    }
   });
   ["dragenter", "dragover"].forEach((ev) => {
     drop.addEventListener(ev, (e) => {
@@ -121,11 +187,12 @@ function bind() {
   });
   bindHoldOrig();
   document.addEventListener("keydown", (e) => {
-    if (e.target.closest("input, textarea, select, button, [contenteditable='true']")) return;
+    if (e.target.closest("input, textarea, select, [contenteditable='true']")) return;
     if (!$("result-stage") || $("result-stage").classList.contains("hidden")) return;
     if (e.key === "1") selectSlot("A");
     if (e.key === "2") selectSlot("B");
     if (e.key === "3") selectSlot("C");
+    if (e.target.closest("button")) return;
     if (e.key === " " || e.code === "Space") {
       e.preventDefault();
       showHeroOriginal();
@@ -137,11 +204,29 @@ function bind() {
   });
 }
 
+function setCompareView(compare) {
+  $("hero-compare").classList.toggle("compare", compare);
+  $("view-single").classList.toggle("active", !compare);
+  $("view-compare").classList.toggle("active", compare);
+  $("view-single").setAttribute("aria-pressed", String(!compare));
+  $("view-compare").setAttribute("aria-pressed", String(compare));
+}
+
+function selectInspector(name) {
+  for (const tab of ["edit", "info"]) {
+    const active = tab === name;
+    $(`tab-${tab}`).setAttribute("aria-selected", String(active));
+    $(`tab-${tab}`).tabIndex = active ? 0 : -1;
+    $(`${tab}-panel`).classList.toggle("hidden", !active);
+  }
+}
+
 function bindHoldOrig() {
   const btn = $("hold-orig");
   const img = $("hero-edit");
   const down = (e) => {
     e.preventDefault();
+    if (e.currentTarget === img) $("hero-compare").focus({preventScroll: true});
     btn.classList.add("down");
     showHeroOriginal();
   };
@@ -154,7 +239,16 @@ function bindHoldOrig() {
     el.addEventListener("pointerup", up);
     el.addEventListener("pointerleave", up);
     el.addEventListener("pointercancel", up);
+    el.addEventListener("contextmenu", (event) => event.preventDefault());
   }
+  btn.addEventListener("keydown", event => {
+    if (event.key === " " || event.key === "Enter") down(event);
+  });
+  btn.addEventListener("keyup", event => {
+    if (event.key === " " || event.key === "Enter") up();
+  });
+  btn.addEventListener("blur", up);
+  window.addEventListener("blur", up);
 }
 
 function showHeroOriginal() {
@@ -183,26 +277,41 @@ async function refreshHealth() {
     const h = await api("/api/health");
     const bits = [];
     const ollama = h.ollama || {};
-    if (h.critic === "ollama") {
-      bits.push(`本地诊断 ${ollama.resolved_model || h.critic_model}`);
-    } else if (ollama.ok && !ollama.ready) {
-      bits.push(`Ollama 已连接，正在准备 ${ollama.model || "视觉模型"}`);
-    } else if (h.critic === "grok") {
-      bits.push(`Grok 诊断（${h.critic_model || h.model}）`);
+    const vision = h.vision || {};
+    const vault = vision.vault || {};
+    if (vision.ready && vision.provider === "vault") {
+      bits.push(`视觉模型已解锁（启用 ${vault.count || 0} 个，当前首选 ${vision.model}）`);
+    } else if (vision.ready && vision.provider !== "local") {
+      bits.push(`${vision.provider === "ollama" ? "本地视觉" : "云端视觉"} ${vision.model || h.critic_model || ""}`);
+      if (vision.provider !== "ollama" && !vision.cloud_connectivity_checked) bits.push("API 已配置，调用时验证");
+    } else if (h.critic === "ollama") {
+      bits.push(`本地视觉 ${ollama.resolved_model || h.critic_model}`);
     } else {
       bits.push("本地规则诊断");
+      if (vision.requested_provider && !["auto", "local"].includes(vision.requested_provider)) bits.push("视觉模型配置不可用");
     }
+    if (vault.exists && !vault.unlocked) bits.push("视觉模型保险箱已锁定，点「视觉模型」输入口令");
+    $("vision-open").dataset.state = vault.exists ? (vault.unlocked ? "unlocked" : "locked") : "none";
     bits.push(h.rawpy ? "RAW 可用" : "仅 JPEG/TIFF/PNG");
     const semantic = h.semantic || {};
     if (semantic.available) bits.push("AI 主体分区可用");
     else if (semantic.enabled) bits.push("智能分区使用基础模式");
     if (h.darktable_cli) bits.push("darktable-cli 已发现");
     const lr = h.lightroom || {};
+    state.lightcraftEnabled = Boolean(lr.enabled);
+    $("drop").querySelector(".lede").textContent = state.lightcraftEnabled
+      ? "先分析照片，再生成三套修图方案。完成后可以选择喜欢的方向，并继续微调。"
+      : "先分析照片，再生成三套基础修图方案。当前模式支持下载和评价，暂不支持文字微调。";
     if (lr.connected) bits.push("LightCraft 已就绪");
-    else if (lr.available) bits.push("处理时会调用 LightCraft");
+    else if (lr.enabled && lr.available) bits.push("LightCraft 暂不可用");
+    else if (lr.enabled) bits.push("尚未安装 LightCraft");
+    else bits.push("基础渲染模式");
     $("health").textContent = bits.join(" · ");
+    document.querySelector(".engine-status").dataset.state = lr.enabled && !lr.connected ? "error" : "ready";
     $("taste").textContent = h.taste || "";
+    updateRefinementButton();
   } catch {
+    document.querySelector(".engine-status").dataset.state = "error";
     $("health").textContent = "后端未启动";
   }
 }
@@ -217,6 +326,10 @@ async function upload(file) {
   show("work-stage");
   $("progress-file").textContent = `${file.name} · ${prettySize(file.size)}`;
   $("progress-title").textContent = "正在上传";
+  if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
+  state.previewUrl = URL.createObjectURL(file);
+  $("processing-preview").src = state.previewUrl;
+  $("processing-preview").classList.remove("hidden");
   markSteps("ingest");
   const body = new FormData();
   body.append("file", file);
@@ -269,6 +382,11 @@ async function poll() {
       const job = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
       if (state.jobId !== jobId) return;
       state.job = job;
+      if (!state.previewUrl && job.source_preview) {
+        $("processing-preview").src = job.source_preview;
+        $("processing-preview").classList.remove("hidden");
+      }
+      $("progress-file").textContent = job.original_name || $("progress-file").textContent;
       $("progress-title").textContent = STEP_COPY[job.step] || job.step;
       markSteps(job.step);
       if (job.status === "ready") {
@@ -305,10 +423,16 @@ function renderResult(job) {
     deliveryNote.className = "compare-hint hidden";
     $("variants").after(deliveryNote);
   }
-  deliveryNote.classList.toggle("hidden", omitted.length === 0);
-  deliveryNote.textContent = omitted.length
-    ? `已保留 ${job.variants.length} 套成片。方案 ${omitted.map(v => v.slot).join("、")} 未达到要求，已撤下。`
-    : "";
+  const similar = job.delivery?.similar_slots || [];
+  const deliveryMessages = [];
+  if (omitted.length) {
+    deliveryMessages.push(`已保留 ${job.variants.length} 套成片。方案 ${omitted.map(v => v.slot).join("、")} 未达到要求，已撤下。`);
+  }
+  if (similar.length) {
+    deliveryMessages.push(`方案 ${similar.join("、")} 与其他方案较接近，已保留有效成片供比较。`);
+  }
+  deliveryNote.classList.toggle("hidden", deliveryMessages.length === 0);
+  deliveryNote.textContent = deliveryMessages.join(" ");
   $("orig-img").src = job.source_preview;
   $("hero-orig").src = job.source_preview;
   $("orig-name").textContent = job.original_name || "";
@@ -316,7 +440,10 @@ function renderResult(job) {
   $("summary").textContent = c.summary || "";
   const sourceLabel = {
     ollama: "本地 Qwen 诊断",
-    grok: "Grok 诊断",
+    grok: "Grok 诊断（临时替代）",
+    xai: "Grok 视觉诊断（临时替代）",
+    vault: "视觉模型诊断",
+    openai: "云端视觉诊断",
     local: "规则诊断",
   }[c.source] || "诊断";
   $("genre").textContent = `${c.genre || "general"} · ${sourceLabel}`;
@@ -324,7 +451,9 @@ function renderResult(job) {
   issues.innerHTML = "";
   for (const issue of c.issues || []) {
     const li = document.createElement("li");
-    li.innerHTML = `<strong>${issue.dim}</strong><div class="bar"><span style="width:${Math.round((issue.severity || 0) * 100)}%"></span></div>${escapeHtml(issue.note || "")}`;
+    const dimension = {exposure: "曝光", color: "色彩", contrast: "反差", detail: "细节", composition: "构图", noise: "噪点", white_balance: "白平衡"}[issue.dim] || issue.dim;
+    const severity = issue.severity >= .7 ? "需要关注" : issue.severity >= .35 ? "建议调整" : "轻微";
+    li.innerHTML = `<div class="issue-heading"><strong>${escapeHtml(dimension)}</strong><span>${severity}</span></div>${escapeHtml(issue.note || "")}`;
     issues.appendChild(li);
   }
   const chips = $("tech-chips");
@@ -365,37 +494,24 @@ function renderResult(job) {
     const btn = document.createElement("article");
     btn.className = "variant";
     btn.dataset.slot = v.slot;
-    const sw = v.recipe?.style_workflow || {};
-    const label = sw.route_label || ({ A: "自然精修", B: "光影层次", C: "不同氛围" }[v.slot] || "候选");
-    const match = sw.mode !== "art-directed" && sw.match_score != null ? ` · 适配 ${Math.round(Number(sw.match_score) * 100)}%` : "";
     btn.innerHTML = `
-      <button type="button" class="variant-preview" aria-label="查看方案 ${v.slot} ${escapeHtml(v.title)}">
-        <img src="${v.url}" alt="${escapeHtml(v.title)}" />
-      </button>
-      <div class="meta">
-        <div class="slot">方案 ${v.slot} · ${escapeHtml(label)}${match}${qaBadge(v.recipe)}</div>
-        <h3>${escapeHtml(v.title)}</h3>
-        <div class="ratings" aria-label="评价方案 ${v.slot}">
-          <button type="button" class="rating" data-verdict="like" aria-pressed="false">满意</button>
-          <button type="button" class="rating" data-verdict="dislike" aria-pressed="false">不满意</button>
+      <div class="variant-main">
+        <button type="button" class="variant-preview" aria-label="查看方案 ${v.slot} ${escapeHtml(v.title)}" aria-pressed="false">
+          <img src="${v.url}" alt="${escapeHtml(v.title)}" /><span class="slot-letter">${escapeHtml(v.slot)}</span>
+        </button>
+        <div class="meta">
+          <p class="slot">方案 ${escapeHtml(v.slot)}</p>
+          <button type="button" class="variant-title" title="${escapeHtml(v.title)}" aria-label="选择方案 ${escapeHtml(v.slot)} ${escapeHtml(v.title)}">${escapeHtml(v.title)}</button>
+          ${qaBadge(v.recipe)}
         </div>
-        <p class="rating-status" role="status" aria-live="polite"></p>
-        <button type="button" class="variant-refine">微调这张成片</button>
-        <p>${escapeHtml(v.why || "")}</p>
-        ${workflowSummary(v.recipe?.workflow)}
-        ${styleWorkflowSummary(sw)}
-        <details>
-          <summary>查看调整细节</summary>
-          <ul>${(v.moves || []).map((m) => `<li>${escapeHtml(m)}</li>`).join("")}</ul>
-          <pre>${escapeHtml(summarizeRecipe(v.recipe))}</pre>
-        </details>
-      </div>`;
+      </div>
+      <div class="ratings" aria-label="评价方案 ${v.slot}">
+        <button type="button" class="rating" data-verdict="like" aria-pressed="false">满意</button>
+        <button type="button" class="rating" data-verdict="dislike" aria-pressed="false">不满意</button>
+      </div>
+      <p class="rating-status" role="status" aria-live="polite"></p>`;
     btn.querySelector(".variant-preview").addEventListener("click", () => selectSlot(v.slot));
-    btn.querySelector(".variant-refine").addEventListener("click", () => {
-      selectSlot(v.slot);
-      $("judge").scrollIntoView({behavior: "smooth", block: "center"});
-      $("notes").focus({preventScroll: true});
-    });
+    btn.querySelector(".variant-title").addEventListener("click", () => selectSlot(v.slot));
     btn.querySelectorAll(".rating").forEach(button => {
       button.addEventListener("click", () => rateVariant(v.slot, button.dataset.verdict));
     });
@@ -419,8 +535,13 @@ function selectSlot(slot) {
   if (!v) return;
   state.selected = slot;
   document.querySelectorAll(".variant").forEach((el) => {
-    el.classList.toggle("selected", el.dataset.slot === slot);
+    const selected = el.dataset.slot === slot;
+    el.classList.toggle("selected", selected);
+    el.querySelector(".variant-preview").setAttribute("aria-pressed", String(selected));
   });
+  $("selected-details").innerHTML = `<p>${escapeHtml(v.why || "")}</p>
+    ${workflowSummary(v.recipe?.workflow)}${styleWorkflowSummary(v.recipe?.style_workflow)}
+    <details><summary>查看配方参数</summary><ul>${(v.moves || []).map(m => `<li>${escapeHtml(m)}</li>`).join("")}</ul><pre>${escapeHtml(summarizeRecipe(v.recipe))}</pre></details>`;
   const version = selectedVersion();
   $("hero-edit").src = version?.url || v.url;
   $("hero-orig").src = comparisonReference();
@@ -475,12 +596,12 @@ function renderRefinementPanel() {
   if (!v) return;
   const records = (state.job.refinements || []).filter(r => r.slot === v.slot);
   const versions = records.filter(r => r.status === "ready");
-  $("refine-title").textContent = `微调方案 ${v.slot} · ${v.title}`;
+  $("refine-title").textContent = `${v.slot} / ${v.title}`;
   $("refine-version").innerHTML = `<option value="">最初成片</option>` + versions.map((r, i) =>
     `<option value="${escapeHtml(r.id)}">微调版 ${i + 1} · ${escapeHtml(r.summary || r.prompt)}</option>`).join("");
   $("refine-version").value = selectedVersion()?.id || "";
   const version = selectedVersion();
-  $("refine-base").textContent = `接下来基于：${version ? `微调版 ${versions.findIndex(r => r.id === version.id) + 1}` : "最初成片"}。满意度评价记录的是上方卡片中的最初成片。`;
+  $("refine-base").textContent = `基于${version ? `微调版 ${versions.findIndex(r => r.id === version.id) + 1}` : "最初成片"}继续调整。方案评价针对最初成片。`;
   $("version-download").href = version?.url || v.url;
   $("version-download").download = `SuperPhoto-${v.slot}${version ? "-微调" : ""}.jpg`;
   const active = records.find(r => ["queued", "running"].includes(r.status));
@@ -496,8 +617,12 @@ function renderRefinementPanel() {
 
 function updateRefinementButton() {
   const active = (state.job?.refinements || []).some(r => r.slot === state.selected && ["queued", "running"].includes(r.status));
-  $("refine-submit").disabled = state.refinementPosting || active || $("notes").value.trim().length < 2;
-  $("refine-submit").textContent = active ? "正在微调这张…" : "让 LightCraft 微调这张";
+  const unavailable = state.lightcraftEnabled === false;
+  $("notes").disabled = unavailable;
+  $("refine-submit").disabled = unavailable || state.refinementPosting || active || $("notes").value.trim().length < 2;
+  $("refine-submit").textContent = unavailable ? "当前模式暂不支持微调" : state.refinementPosting ? "正在提交…" : active ? "正在微调这张…" : "开始微调 ↗";
+  document.querySelectorAll("[data-prompt]").forEach(button => button.disabled = unavailable || state.refinementPosting || active);
+  if (unavailable) $("refine-status").textContent = "基础模式的成片可以下载和评价；文字微调需要启用完整出片引擎。";
 }
 
 async function submitRefinement() {
@@ -563,6 +688,12 @@ function reset() {
   state.refinementRequest = null;
   $("file").value = "";
   $("notes").value = "";
+  if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
+  state.previewUrl = null;
+  $("processing-preview").removeAttribute("src");
+  $("processing-preview").classList.add("hidden");
+  setCompareView(false);
+  selectInspector("edit");
   show("drop-stage");
   refreshHealth();
 }
@@ -591,6 +722,7 @@ function fail(message) {
 }
 
 function show(id) {
+  $("new-photo").classList.toggle("hidden", !["result-stage", "error-stage"].includes(id));
   for (const stage of ["drop-stage", "work-stage", "result-stage", "error-stage"]) {
     $(stage).classList.toggle("hidden", stage !== id);
   }
@@ -658,8 +790,42 @@ function styleWorkflowSummary(style) {
   </details>`;
 }
 
+function summarizeDirected(recipe) {
+  const develop = recipe.plan?.develop || {};
+  const names = {
+    exposure: "曝光", contrast: "对比", highlights: "高光", shadows: "阴影", whites: "白色", blacks: "黑色",
+    temp: "色温", tint: "色调", saturation: "饱和度", vibrance: "自然饱和度", clarity: "清晰度",
+    texture: "纹理", dehaze: "去朦胧",
+  };
+  const fmt = (key, value) => key === "exposure"
+    ? `${names[key]} ${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(2)} EV`
+    : `${names[key] || key} ${Number(value) >= 0 ? "+" : ""}${Math.round(Number(value))}`;
+  const moves = (values) => Object.entries(values || {})
+    .filter(([key, value]) => names[key] && Math.abs(Number(value) || 0) > 1e-3)
+    .map(([key, value]) => fmt(key, value));
+  const lines = [];
+  const global = [...moves(develop.light), ...moves(develop.color), ...moves(develop.effects)];
+  if (global.length) lines.push(`全局：${global.join(" / ")}`);
+  if (develop.wb && (develop.wb.temp || develop.wb.tint)) {
+    lines.push(`白平衡：色温 ${Math.round(develop.wb.temp || 0)}K / 色调 ${Math.round(develop.wb.tint || 0)}`);
+  }
+  for (const [key, label] of [["shadows", "阴影"], ["midtones", "中间调"], ["highlights", "高光"]]) {
+    const wheel = develop.grading?.[key];
+    if (wheel && Number(wheel.sat) > 0) lines.push(`${label}色轮：${Math.round(wheel.hue || 0)}° / 饱和度 ${Math.round(wheel.sat)}`);
+  }
+  for (const mask of recipe.plan?.masks || []) {
+    const kind = mask.shape?.kind === "linear" ? "线性渐变" : "径向";
+    const local = moves(mask.adjust);
+    lines.push(`${mask.name}（${kind}）：${local.join(" / ") || "局部调整"}`);
+  }
+  const directed = recipe.directed || {};
+  if (directed.rounds > 1) lines.push(`复核修订：第 ${directed.selected_round + 1} 版 / 共 ${directed.rounds} 版`);
+  return lines.join("\n");
+}
+
 function summarizeRecipe(recipe) {
   if (!recipe) return "";
+  if (recipe.engine === "lightcraft-directed") return summarizeDirected(recipe);
   const lines = [];
   if (recipe.lut_mix > 0 && recipe.lut_mix < 0.98) {
     lines.push(`风格参考强度: ${Math.round(Number(recipe.lut_mix) * 100)}%`);
@@ -738,4 +904,322 @@ async function api(url) {
     throw new Error(err.detail || res.statusText);
   }
   return res.json();
+}
+
+// ---- Vision-model vault -------------------------------------------------
+// The user picks a provider and pastes a key. The server fills in the address
+// and protocol and picks a model that can read images; the key goes straight
+// into the encrypted vault and is never shown again.
+
+let VISION_PRESETS = [];
+
+async function loadVisionPresets() {
+  if (!VISION_PRESETS.length) VISION_PRESETS = await api("/api/vision/presets");
+  return VISION_PRESETS;
+}
+
+async function visionRequest(url, body) {
+  const res = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body || {}), credentials: "same-origin"});
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const error = new Error(typeof data.detail === "string" ? data.detail : "操作失败");
+    error.status = res.status;
+    throw error;
+  }
+  return data;
+}
+
+async function openVisionDialog() {
+  const dialog = $("vision-dialog");
+  if (!dialog.open) dialog.showModal();
+  try {
+    await loadVisionPresets();
+    renderVision(await api("/api/vision/vault"));
+  } catch (err) {
+    $("vision-error").textContent = err.message;
+  }
+}
+
+async function visionFail(err) {
+  if (err.status === 403) {
+    try { renderVision(await api("/api/vision/vault")); } catch {}
+  }
+  $("vision-error").textContent = err.message || String(err);
+}
+
+function renderVision(v) {
+  $("vision-error").textContent = "";
+  const body = $("vision-body");
+  body.innerHTML = "";
+  if (!v.exists) renderVaultCreate(body, v);
+  else if (!v.manage) renderVaultUnlock(body, v);
+  else renderVaultManage(body, v);
+}
+
+function visionForm(html) {
+  const form = document.createElement("form");
+  form.className = "vision-form";
+  form.autocomplete = "off";
+  form.innerHTML = html;
+  return form;
+}
+
+function renderVaultCreate(body, v) {
+  const form = visionForm(`
+    <h3>先设置保险箱口令</h3>
+    <p class="vision-hint">口令至少 ${v.min_passphrase} 个字符。它只用来加密，不会保存在任何地方；忘记后只能清空重来。</p>
+    <label>口令<input type="password" name="p1" autocomplete="new-password" minlength="${v.min_passphrase}" required></label>
+    <label>再输入一次<input type="password" name="p2" autocomplete="new-password" required></label>
+    <div class="vision-row"><button class="btn primary" type="submit">创建并解锁</button></div>`);
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const p1 = form.elements.p1.value, p2 = form.elements.p2.value;
+    if (p1 !== p2) { $("vision-error").textContent = "两次输入的口令不一致"; return; }
+    form.querySelector("button").disabled = true;
+    try {
+      const data = await visionRequest("/api/vision/vault/create", {passphrase: p1});
+      form.reset();
+      renderVision(data);
+    } catch (err) { visionFail(err); } finally { form.querySelector("button").disabled = false; }
+  };
+  body.appendChild(form);
+}
+
+function renderVaultUnlock(body, v) {
+  const status = v.unlocked
+    ? `保险箱已解锁，正在使用 ${v.count || 0} 个模型。输入口令可以查看和修改配置。`
+    : "保险箱已锁定。客户端每次启动后都要输入口令，模型才能使用。";
+  const form = visionForm(`
+    <p class="vision-status">${status}</p>
+    <label>口令<input type="password" name="passphrase" autocomplete="current-password" required></label>
+    <div class="vision-row"><button class="btn primary" type="submit">解锁</button>
+      ${v.unlocked ? '<button class="btn ghost" type="button" data-act="lock">立即锁定</button>' : ""}</div>
+    <details class="vision-reset"><summary>忘记口令</summary>
+      <p class="vision-hint">只能删除全部模型配置后重新设置。输入「重置」确认。</p>
+      <div class="vision-row"><input name="confirm" placeholder="重置"><button class="btn ghost" type="button" data-act="reset">删除全部配置</button></div>
+    </details>`);
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const button = form.querySelector("button[type=submit]");
+    button.disabled = true;
+    try {
+      const data = await visionRequest("/api/vision/vault/unlock", {passphrase: form.elements.passphrase.value});
+      form.reset();
+      renderVision(data);
+    } catch (err) { form.elements.passphrase.value = ""; visionFail(err); } finally { button.disabled = false; }
+  };
+  form.querySelector("[data-act=reset]").onclick = async () => {
+    try { renderVision(await visionRequest("/api/vision/vault/reset", {confirm: form.elements.confirm.value.trim()})); }
+    catch (err) { visionFail(err); }
+  };
+  const lockButton = form.querySelector("[data-act=lock]");
+  if (lockButton) lockButton.onclick = lockVault;
+  body.appendChild(form);
+}
+
+async function lockVault() {
+  try { renderVision(await visionRequest("/api/vision/vault/lock")); } catch (err) { visionFail(err); }
+}
+
+function hostOf(url) {
+  try { return new URL(url).host; } catch { return url; }
+}
+
+function renderVaultManage(body, v) {
+  const profiles = v.profiles || [];
+  const head = document.createElement("div");
+  head.className = "vision-row vision-toolbar";
+  const bridge = v.bridge ? " · 本机评测通道已开启（本机程序可借用这里的模型，只拿到脱敏回答，看不到 Key 和模型名）" : "";
+  head.innerHTML = `<p class="vision-status">已解锁 · 启用 ${v.count || 0} 个 · 按列表顺序优先使用，前一个失败时自动换下一个${bridge}</p>
+    <button class="btn ghost" type="button" data-act="passphrase">修改口令</button>
+    <button class="btn ghost" type="button" data-act="lock">锁定</button>`;
+  head.querySelector("[data-act=lock]").onclick = lockVault;
+  head.querySelector("[data-act=passphrase]").onclick = () => renderPassphraseForm(body);
+  body.appendChild(head);
+
+  const list = document.createElement("ol");
+  list.className = "vision-list";
+  if (!profiles.length) list.innerHTML = `<li class="vision-empty">还没有模型。点「添加模型」开始。</li>`;
+  profiles.forEach((p, index) => {
+    const item = document.createElement("li");
+    item.className = "vision-item" + (p.enabled ? "" : " disabled");
+    const preset = VISION_PRESETS.find(x => x.id === p.preset);
+    // The address is worth showing only where the user typed it.
+    const where = !preset || preset.custom_url || !preset.needs_key || preset.base_url !== p.base_url
+      ? ` · ${escapeHtml(hostOf(p.base_url))}` : "";
+    item.innerHTML = `
+      <div class="vision-meta"><strong>${escapeHtml(p.slot)}</strong>${p.label ? `<span class="vision-label">${escapeHtml(p.label)}</span>` : ""}
+        ${p.enabled ? "" : '<span class="vision-off">已停用</span>'}
+        <span class="vision-detail">${escapeHtml(p.provider_name || "")} · ${escapeHtml(p.model)}${where} · ${p.has_key ? "Key 已保存" : "无 Key"}</span></div>
+      <div class="vision-actions">
+        <button type="button" data-act="up" ${index === 0 ? "disabled" : ""} aria-label="上移">↑</button>
+        <button type="button" data-act="down" ${index === profiles.length - 1 ? "disabled" : ""} aria-label="下移">↓</button>
+        <button type="button" data-act="test">测试</button>
+        <button type="button" data-act="edit">编辑</button>
+        <button type="button" data-act="toggle">${p.enabled ? "停用" : "启用"}</button>
+        <button type="button" data-act="delete">删除</button>
+      </div>
+      <p class="vision-test"></p>`;
+    const ids = profiles.map(x => x.id);
+    const move = async (delta) => {
+      const next = ids.slice();
+      [next[index], next[index + delta]] = [next[index + delta], next[index]];
+      try { renderVision(await visionRequest("/api/vision/profiles/order", {ids: next})); } catch (err) { visionFail(err); }
+    };
+    item.querySelector("[data-act=up]").onclick = () => move(-1);
+    item.querySelector("[data-act=down]").onclick = () => move(1);
+    item.querySelector("[data-act=edit]").onclick = () => renderProfileForm(body, p);
+    item.querySelector("[data-act=toggle]").onclick = async () => {
+      try {
+        renderVision(await visionRequest("/api/vision/profiles", {id: p.id, preset: p.preset, label: p.label,
+          base_url: p.base_url, model: p.model, protocol: p.protocol, enabled: !p.enabled}));
+      } catch (err) { visionFail(err); }
+    };
+    item.querySelector("[data-act=delete]").onclick = async () => {
+      if (!confirm(`删除${p.slot}？保存的 API Key 会一起删除。`)) return;
+      try { renderVision(await visionRequest(`/api/vision/profiles/${encodeURIComponent(p.id)}/delete`)); }
+      catch (err) { visionFail(err); }
+    };
+    item.querySelector("[data-act=test]").onclick = async (event) => {
+      const out = item.querySelector(".vision-test");
+      event.target.disabled = true;
+      out.textContent = "正在发送一张 64×64 的纯色测试图…";
+      try {
+        out.textContent = describeVisionTest(await visionRequest(`/api/vision/profiles/${encodeURIComponent(p.id)}/test`));
+      } catch (err) { out.textContent = ""; visionFail(err); } finally { event.target.disabled = false; }
+    };
+    list.appendChild(item);
+  });
+  body.appendChild(list);
+
+  const add = document.createElement("div");
+  add.className = "vision-row";
+  add.innerHTML = `<button class="btn primary" type="button" ${profiles.length >= 12 ? "disabled" : ""}>添加模型</button>`;
+  add.querySelector("button").onclick = () => renderProfileForm(body, null);
+  body.appendChild(add);
+}
+
+function describeVisionTest(result) {
+  if (!result.ok) {
+    const hints = {401: "API Key 无效", 403: "没有权限使用这个模型", 404: "模型名或服务地址不对", 429: "额度不足或请求过于频繁"};
+    const named = {APIConnectionError: "连不上服务地址", APITimeoutError: "请求超时", ConnectError: "连不上服务地址",
+      ReadTimeout: "请求超时", AuthenticationError: "API Key 无效", NotFoundError: "模型名或服务地址不对"};
+    const reason = hints[result.status] || named[result.error] || result.error;
+    return `失败：${reason}${result.status ? `（HTTP ${result.status}）` : ""} · ${result.latency_s}s`;
+  }
+  const seen = result.sees_image === true ? "能看到图片" : result.sees_image === false
+    ? "有回答，但没认出图片颜色，可能不支持图片输入" : "有回答，但不是 JSON 格式";
+  return `连接成功 · ${result.latency_s}s · ${seen}`;
+}
+
+function renderProfileForm(body, profile) {
+  body.querySelector(".vision-profile-form")?.remove();
+  body.querySelector(".vision-passphrase-form")?.remove();
+  const editing = Boolean(profile);
+  const current = profile || {preset: VISION_PRESETS[0].id, label: "", base_url: "", model: "", protocol: "", enabled: true};
+  const options = VISION_PRESETS.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("");
+  const form = visionForm(`
+    <h3>${editing ? `编辑${escapeHtml(profile.slot)}` : "添加模型"}</h3>
+    <label>服务商<select name="preset">${options}</select></label>
+    <label data-for="key">API Key<input type="password" name="api_key" autocomplete="off" spellcheck="false"></label>
+    <label data-for="url">服务地址<input name="base_url" spellcheck="false"></label>
+    <details class="vision-advanced"><summary>高级设置（一般不用填）</summary>
+      <label>模型名<input name="model" spellcheck="false" placeholder="留空：自动挑选能看图的模型"></label>
+      <label data-for="cloud-url">服务地址<input name="base_url_override" spellcheck="false" placeholder="留空：使用服务商的官方地址"></label>
+      <label data-for="openai">接口协议<select name="protocol"><option value="chat/completions">chat/completions</option><option value="responses">responses</option></select></label>
+      <label>备注名（只在这个窗口显示）<input name="label" maxlength="40"></label>
+    </details>
+    <label class="vision-check"><input type="checkbox" name="enabled"> 启用</label>
+    <p class="vision-hint" data-role="hint"></p>
+    <div class="vision-row"><button class="btn primary" type="submit">保存</button><button class="btn ghost" type="button" data-act="cancel">取消</button>
+      <span class="vision-progress" aria-live="polite"></span></div>`);
+  form.classList.add("vision-profile-form");
+  const el = form.elements;
+  const presetOf = () => VISION_PRESETS.find(p => p.id === el.preset.value) || VISION_PRESETS[VISION_PRESETS.length - 1];
+  el.preset.value = current.preset || "custom";
+  el.label.value = current.label || "";
+  el.model.value = current.model || "";
+  el.enabled.checked = current.enabled !== false;
+  // Typed address: required for custom services, editable for local ones, an override for cloud presets.
+  const fillAddress = (preset, url) => {
+    const typed = preset.custom_url || !preset.needs_key;
+    el.base_url.value = typed ? (url || preset.base_url) : "";
+    el.base_url_override.value = !typed && url && url !== preset.base_url ? url : "";
+    el.protocol.value = (editing && current.protocol && preset.id === current.preset ? current.protocol : preset.protocol) || "chat/completions";
+  };
+  const sync = () => {
+    const preset = presetOf();
+    const typed = preset.custom_url || !preset.needs_key;
+    form.querySelector("[data-for=key]").classList.toggle("hidden", !preset.needs_key);
+    form.querySelector("[data-for=url]").classList.toggle("hidden", !typed);
+    form.querySelector("[data-for=cloud-url]").classList.toggle("hidden", typed);
+    form.querySelector("[data-for=openai]").classList.toggle("hidden", preset.kind !== "openai");
+    el.base_url.required = Boolean(preset.custom_url);
+    el.api_key.placeholder = editing && profile.has_key && preset.id === current.preset
+      ? "已保存。留空表示不修改" : preset.needs_key ? "粘贴这个服务商的 API Key" : "本机服务不需要";
+    form.querySelector("[data-role=hint]").textContent = preset.needs_key
+      ? "保存时会用这个 Key 查询模型列表，并向排在前面的几个模型发送一张 64×64 的纯色测试图，选出第一个能看懂图片的模型。换服务商后需要重新填写 Key，已保存的 Key 不会发往新地址。"
+      : "保存时会查询这台服务上已经装好的模型，挑出能看懂图片的那个。";
+  };
+  fillAddress(presetOf(), current.base_url);
+  sync();
+  el.preset.onchange = () => {
+    fillAddress(presetOf(), "");
+    el.model.value = "";  // A model id from another provider would not exist here.
+    sync();
+  };
+  form.querySelector("[data-act=cancel]").onclick = () => form.remove();
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const preset = presetOf();
+    const typed = preset.custom_url || !preset.needs_key;
+    const payload = {preset: preset.id, label: el.label.value.trim(), model: el.model.value.trim(),
+      base_url: (typed ? el.base_url.value : el.base_url_override.value).trim(),
+      protocol: preset.kind === "openai" ? el.protocol.value : null, enabled: el.enabled.checked};
+    if (editing) payload.id = profile.id;
+    if (preset.needs_key && el.api_key.value.trim()) payload.api_key = el.api_key.value.trim();
+    const button = form.querySelector("button[type=submit]");
+    const progress = form.querySelector(".vision-progress");
+    button.disabled = true;
+    progress.textContent = payload.model ? "正在保存…" : "正在挑选能看图的模型，最多需要一两分钟…";
+    try {
+      const data = await visionRequest("/api/vision/profiles", payload);
+      el.api_key.value = "";
+      renderVision(data);
+      if (data.discovery) {
+        $("vision-error").textContent = "";
+        const note = document.createElement("p");
+        note.className = "vision-test vision-picked";
+        note.textContent = `已自动选择 ${data.discovery.model}，测试图识别正确 · ${data.discovery.latency_s}s`;
+        $("vision-body").querySelector(".vision-list")?.after(note);
+      }
+    } catch (err) { visionFail(err); } finally { button.disabled = false; progress.textContent = ""; }
+  };
+  body.appendChild(form);
+  (presetOf().needs_key ? el.api_key : el.preset).focus();
+}
+
+function renderPassphraseForm(body) {
+  body.querySelector(".vision-profile-form")?.remove();
+  body.querySelector(".vision-passphrase-form")?.remove();
+  const form = visionForm(`
+    <h3>修改口令</h3>
+    <label>当前口令<input type="password" name="old" autocomplete="current-password" required></label>
+    <label>新口令<input type="password" name="p1" autocomplete="new-password" required></label>
+    <label>再输入一次<input type="password" name="p2" autocomplete="new-password" required></label>
+    <div class="vision-row"><button class="btn primary" type="submit">修改</button><button class="btn ghost" type="button" data-act="cancel">取消</button></div>`);
+  form.classList.add("vision-passphrase-form");
+  form.querySelector("[data-act=cancel]").onclick = () => form.remove();
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    if (form.elements.p1.value !== form.elements.p2.value) { $("vision-error").textContent = "两次输入的新口令不一致"; return; }
+    try {
+      const data = await visionRequest("/api/vision/vault/passphrase", {old: form.elements.old.value, new: form.elements.p1.value});
+      form.reset();
+      renderVision(data);
+      $("vision-error").textContent = "口令已修改";
+    } catch (err) { visionFail(err); }
+  };
+  body.appendChild(form);
 }

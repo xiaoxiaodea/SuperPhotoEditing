@@ -9,9 +9,24 @@ from PIL import Image
 
 @pytest.fixture(autouse=True)
 def _disable_remote_critics(monkeypatch) -> None:
+    from superphoto.config import Settings
+
+    # Tests must never read a developer's real cloud credentials from .env.
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    for name in ("OPENAI_API_KEY", "SUPERPHOTO_OPENAI_API_KEY", "SUPERPHOTO_XAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SUPERPHOTO_VISION_PROVIDER", "auto")
     monkeypatch.setenv("SUPERPHOTO_OLLAMA_ENABLED", "0")
     monkeypatch.setenv("SUPERPHOTO_LIGHTROOM_ENABLED", "0")
     monkeypatch.setenv("XAI_API_KEY", "")
+    # Nor a developer's real vision vault under ./data; cheap KDF keeps tests fast.
+    from superphoto import vault
+
+    vault.lock()
+    monkeypatch.setattr(vault, "FILENAME", "vision-vault.pytest.json")
+    monkeypatch.setattr(vault, "_KDF", {"name": "scrypt", "n": 2 ** 10, "r": 8, "p": 1})
+    yield
+    vault.lock()
 
 
 def make_scene(path: Path, *, underexposed: bool = True, size: tuple[int, int] = (960, 640)) -> Path:

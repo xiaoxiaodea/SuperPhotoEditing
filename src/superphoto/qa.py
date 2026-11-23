@@ -21,7 +21,7 @@ from .preference import (
     local_edit_for,
     protect_look,
     honor_locked_controls,
-    sanitize_correction,
+    correction_recipe,
 )
 from .recipes import get_look
 from .workflow import apply_ethics, guard_hues
@@ -108,6 +108,8 @@ def refine_plan(
                   else _scale_recipe(plan.recipe, .78))
         recipe = recipe.model_copy(update={name: getattr(plan.recipe, name).model_copy(deep=True)
                                            for name in ("detail", "optics", "crop")})
+        from .exposure import preserve_exposure_correction
+        recipe = preserve_exposure_correction(recipe, plan.primary, technical)
         return plan.model_copy(update={"recipe": honor_locked_controls(recipe, plan.intent)})
     look = get_look(plan.look_id)
     mix = float(plan.lut_mix)
@@ -147,9 +149,10 @@ def refine_plan(
     look_recipe = _scale_recipe(base_recipe, mix)
     look_recipe = _fit_lut_to_scene(look_recipe, look.id, technical).merged(extra)
     look_recipe = protect_look(look_recipe, plan.intent)
-    correction = sanitize_correction(critique.correction, technical).as_recipe()
+    correction = correction_recipe(critique.correction, technical, plan.intent)
     correction = correction.model_copy(update={"masks": [m.model_copy(deep=True) for m in plan.recipe.masks]})
-    recipe = _adapt_to_scene(correction.merged(look_recipe), technical, look.id)
+    from .exposure import merge_correction_style
+    recipe = _adapt_to_scene(merge_correction_style(correction, look_recipe, technical), technical, look.id)
     recipe = recipe.model_copy(
         update={
             "local": recipe.local.merged(
@@ -162,6 +165,8 @@ def refine_plan(
             )
         }
     ).clamped()
+    from .exposure import preserve_exposure_correction
+    recipe = preserve_exposure_correction(recipe, correction, technical)
     recipe = apply_ethics(guard_hues(recipe, technical, plan.ethics), plan.ethics)
     recipe = honor_locked_controls(recipe, plan.intent)
     recipe = recipe.model_copy(update={

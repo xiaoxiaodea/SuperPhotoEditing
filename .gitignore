@@ -32,3 +32,9 @@ vendor/lightroom-mcp/server/node_modules/
 vendor/lightroom-mcp/server/coverage/
 vendor/lightcraft/lightcraft-cli
 vendor/lightcraft/*.zip
+vendor/lightcraft/*.exe
+vendor/lightcraft/*.tar.gz
+# Local reference library (commercial presets, the photographer's DNGs and videos) and rendered outputs stay local.
+/resources/
+/outputs/
+.claude/settings.local.json

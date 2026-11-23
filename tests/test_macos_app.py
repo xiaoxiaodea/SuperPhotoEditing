@@ -21,5 +21,5 @@ def test_launcher_does_not_read_desktop_project():
     assert "Desktop/Projects" not in script
     assert "uv run --project" not in script
     assert "SUPERPHOTO_ROOT" in script
-    assert "SUPERPHOTO_NODE=\"/tmp/node\"" in script
-    assert "Application Support/SuperPhoto" in script
+    assert f'SUPERPHOTO_NODE="{Path("/tmp/node")}"' in script
+    assert "Application Support/SuperPhoto" in script.replace("\\", "/")

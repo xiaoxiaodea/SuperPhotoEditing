@@ -13,11 +13,11 @@ def main():
     parser.add_argument("job", type=Path)
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
-    critique = Critique.model_validate_json((args.job / "critique.json").read_text())
-    technical = TechnicalReport.model_validate_json((args.job / "technical.json").read_text())
+    critique = Critique.model_validate_json((args.job / "critique.json").read_text(encoding="utf-8"))
+    technical = TechnicalReport.model_validate_json((args.job / "technical.json").read_text(encoding="utf-8"))
     directions = design_directions(Settings(), args.job / "critique_preview.jpg", critique, technical,
                                    audit_path=args.out)
-    audit = json.loads(args.out.read_text())
+    audit = json.loads(args.out.read_text(encoding="utf-8"))
     print(json.dumps({"issues": audit["issues"], "selected": [{"slot": d.slot, "title": d.title, "source": d.source}
                                                               for d in directions]}, ensure_ascii=False, indent=2))
 

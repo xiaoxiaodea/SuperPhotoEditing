@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -9,17 +10,40 @@ class Settings(BaseSettings):
         env_file=".env",
         env_prefix="SUPERPHOTO_",
         extra="ignore",
+        populate_by_name=True,
     )
 
     data_dir: Path = Path("./data")
     host: str = "127.0.0.1"
     port: int = 8765
+    access_token: str = Field(default="", repr=False)
     max_upload_mb: int = 80
     working_edge: int = 2048
     preview_edge: int = 1600
     critique_edge: int = 1280
+    # auto preserves Ollama -> cloud -> local; explicit cloud never probes Ollama.
+    vision_provider: Literal["auto", "ollama", "openai", "xai", "local"] = "auto"
+    openai_api_key: str = Field(
+        default="", repr=False,
+        validation_alias=AliasChoices("SUPERPHOTO_OPENAI_API_KEY", "OPENAI_API_KEY"),
+    )
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_model: str = "gpt-4.1-mini"
+    openai_protocol: Literal["chat/completions", "responses"] = "chat/completions"
+    xai_protocol: Literal["chat/completions", "responses"] = "responses"
+    vision_timeout: float = Field(default=90.0, gt=0, le=600)
+    vision_max_retries: int = Field(default=1, ge=0, le=3)
+    # auto: schema -> JSON object -> prompt, only on a format-specific rejection.
+    vision_schema_mode: Literal["auto", "json_schema", "json_object", "prompt"] = "auto"
+    # Client side: let other processes on this machine use the unlocked vault through a
+    # loopback endpoint guarded by a random per-run token (data_dir/vision-bridge.token).
+    # They get redacted answers and slot labels only, never keys, addresses or model ids.
+    vision_bridge: bool = False
+    # Caller side: the running client's URL and that token. Used in auto, before .env providers.
+    vision_bridge_url: str = ""
+    vision_bridge_token: str = Field(default="", repr=False)
     xai_api_key: str = Field(
-        default="",
+        default="", repr=False,
         validation_alias=AliasChoices("XAI_API_KEY", "SUPERPHOTO_XAI_API_KEY"),
     )
     xai_model: str = Field(
@@ -51,6 +75,15 @@ class Settings(BaseSettings):
     # weaknesses and rejected a visually stronger reference-guided candidate.
     finishing_review_enabled: bool = False
     finishing_max_rounds: int = Field(default=2, ge=0, le=2)
+    # auto: when a vision model and LightCraft are both available, the vision
+    # model reads the baseline, writes native settings with linear/radial masks
+    # and reviews the renders; otherwise the legacy slider pipeline runs.
+    # directed: fail instead of falling back. legacy: never use the vision planner.
+    pipeline_mode: Literal["auto", "directed", "legacy"] = "auto"
+    # Review-and-revise rounds per candidate after its first render.
+    directed_max_revisions: int = Field(default=2, ge=0, le=3)
+    # Planning returns three complete versions; reasoning models need longer than a review.
+    directed_vision_timeout: float = Field(default=240.0, gt=0, le=900)
 
     @property
     def jobs_dir(self) -> Path:

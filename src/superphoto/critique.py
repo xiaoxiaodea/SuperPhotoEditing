@@ -11,7 +11,7 @@ from .analysis import correction_from_technical, guess_genre
 from .composition import clamp_geometry, suggest_geometry
 from .config import Settings
 from .models import CorrectionHint, Critique, EditIntent, GeometryHint, Issue, MaskAdjustment, RegionBox, TechnicalReport
-from .ollama import chat_vision, probe
+from .vision import chat_vision, probe, provider_from, safe_error
 from .look_routes import route_legend
 from .preference import look_match, ranked_look_ids
 from .recipes import LOOKS, allowed_look_ids
@@ -52,32 +52,53 @@ def critique_photo(
 ) -> Critique:
     local = local_critique(technical)
     status = probe(settings)
-    vision_ready = bool(status.get("ready") and status.get("resolved_model"))
-    if vision_ready:
+    ready = bool(status.get("ready") and status.get("resolved_model"))
+    candidates = status.get("candidates", [{"provider": "ollama", "model": status.get("resolved_model")}]
+                            if ready else [])
+    audit = {"requested_provider": settings.vision_provider, "provider": "local", "model": None,
+             "attempts": [], "unavailable": status.get("unavailable", []), "fallback": False}
+    local.transport_audit = audit
+    # Diagnosis also tries the next auto provider after unusable JSON, preserving
+    # the original initial-critique fallback behavior.
+    for candidate in candidates:
+        transport: dict = {}
+        selected = {**status, "provider": candidate["provider"], "candidates": [candidate]}
         try:
-            remote = ollama_critique(settings, preview_path, technical, status["resolved_model"])
-            return _merge_with_local(remote, local)
+            remote = ollama_critique(settings, preview_path, technical, candidate["model"],
+                                     selection=selected, audit=transport)
+            actual = provider_from(selected, transport)
+            audit["attempts"].append(transport)
+            audit.update(provider=actual, model=transport.get("model") or candidate["model"],
+                         usage=transport.get("usage"),
+                         fallback=len(audit["attempts"]) > 1 or status.get("fallback", False))
+            merged = _merge_with_local(remote, local)
+            merged.vision_provider, merged.transport_audit = actual, audit
+            if len(audit["attempts"]) > 1:
+                merged.summary += " （首选视觉诊断失败，已使用备用模型）"
+            return merged
         except Exception as exc:
-            local.summary = (local.summary + f" （Ollama 诊断失败：{_format_critique_error(exc)}）").strip()
-    if settings.xai_api_key:
-        try:
-            remote = grok_critique(settings, preview_path, technical)
-            return _merge_with_local(remote, local)
-        except Exception:
-            pass
-    note = (
-        "（视觉模型输出无法使用，已用本地技术分析）"
-        if vision_ready
-        else "（视觉模型未就绪，已用本地技术分析）"
-    )
-    if note not in local.summary:
-        local.summary = (local.summary + " " + note).strip()
+            transport["validation_error"] = {"type": type(exc).__name__}
+            audit["attempts"].append(transport)
+            label = candidate.get("label") or candidate["provider"]
+            detail = (_format_critique_error(exc) if isinstance(exc, (ValueError, json.JSONDecodeError))
+                      else safe_error(exc))
+            local.summary += f" （{label} 诊断失败：{detail}）"
+            if settings.vision_provider != "auto":
+                break
+    audit["fallback"] = settings.vision_provider != "local"
+    note = ("（视觉模型输出无法使用，已用本地技术分析）" if ready else
+            "（视觉模型未就绪，已用本地技术分析）")
+    if settings.vision_provider == "local":
+        note = "（已选择本地技术分析）"
+    local.summary = (local.summary + " " + note).strip()
     return local
 
 
 def local_critique(technical: TechnicalReport) -> Critique:
     genre = guess_genre(technical)
-    correction = correction_from_technical(technical)
+    # Describe the executable local correction, including developed-file limits.
+    from .preference import sanitize_correction
+    correction = sanitize_correction(correction_from_technical(technical), technical)
     issues: list[Issue] = []
     do_not: list[str] = []
 
@@ -86,11 +107,18 @@ def local_critique(technical: TechnicalReport) -> Critique:
             Issue(
                 dim="highlights",
                 severity=min(1.0, 0.4 + technical.highlight_clip * 12),
-                note="高光已有裁切，优先压高光而不是继续加曝光。",
+                note=(f"约 {technical.white_clip_fraction:.0%} 区域的 RGB 通道已接近纯白；JPEG 无法恢复这些区域原有纹理，压暗白块不等于恢复细节。"
+                      if technical.source_kind in {"jpeg", "png"} and technical.white_clip_fraction >= .03
+                      else "高光已有裁切，优先压高光而不是继续加曝光。"),
             )
         )
         do_not.append("不要为了提亮暗部把天空或窗户拉爆")
-    if technical.mean_luma < 0.08 and correction.exposure_ev > 0.15:
+    from .exposure import developed_lift_ev
+    if developed_lift_ev(technical) > .15 and correction.exposure_ev > .15:
+        issues.append(Issue(dim="exposure", severity=.45,
+            note=f"中间调偏暗且亮部仍有余量，建议约 +{correction.exposure_ev:.2f} EV；实际成片还需验证改善。"))
+        do_not.append("保留深黑与现场光色；提亮后检查衣物、天空等亮部，不把全局提亮当作人物精修")
+    elif technical.mean_luma < 0.08 and correction.exposure_ev > 0.15:
         issues.append(
             Issue(
                 dim="exposure",
@@ -153,7 +181,8 @@ def local_critique(technical: TechnicalReport) -> Critique:
                 note="锐度偏低，可能是微距失焦或预览缩小，清晰度滑条只能适度补偿。",
             )
         )
-    if technical.noise > 0.08 and technical.exif.get("ISOSpeedRatings"):
+    from .workflow import _iso
+    if technical.noise > 0.08 and _iso(technical) >= 1600:
         issues.append(
             Issue(
                 dim="noise",
@@ -205,7 +234,7 @@ def local_critique(technical: TechnicalReport) -> Critique:
         do_not=do_not[:5],
         correction=correction,
         looks=looks,
-        source="local",
+        source="local", vision_provider="local",
         lut_mix=float(np.clip(lut_mix, 0.48, 0.72)),
         geometry=suggest_geometry(technical, genre, "B"),
     )
@@ -258,7 +287,10 @@ Choose a visible, justified improvement in light hierarchy; a tiny edit is not a
 Do not label a whole hillside as a selectable subject. Never suggest generative fill or face-changing retouch.
 
 JPEG/PNG files are already developed. Be conservative:
-- exposure_ev is usually 0. Never go beyond -0.3..+0.25 on a JPEG.
+- exposure_ev is usually 0, normally -0.3..+0.25. Only when unclipped AND chromatic content
+  is broadly too bright (not merely a white sky/wall/snow), a correction down to -0.8 is allowed.
+  Clipped neutral JPEG whites contain no recoverable texture. Do not call darkening them recovery;
+  the executor may use a white-preserving tonal curve instead of globally darkening the white plateau.
 - Low-key is a choice. If the subject (flower, face, peak) is already well exposed, leave exposure at 0. Do not lift a dark pond.
 - shadows at most +0.10. highlights at most -0.25.
 - Distinguish ambient light from reflected sunlight; preserve the colors actually visible in each region.
@@ -302,13 +334,21 @@ def ollama_critique(
     preview_path: Path,
     technical: TechnicalReport,
     model: str,
+    *, selection: dict | None = None, audit: dict | None = None,
 ) -> Critique:
+    """Legacy entry point; provider policy is enforced by the shared transport."""
     import base64
 
+    selection = selection if selection is not None else probe(settings)
+    transport = audit if audit is not None else {}
     image_b64 = base64.b64encode(preview_path.read_bytes()).decode("ascii")
-    text = chat_vision(settings, model, _vlm_prompt(technical), image_b64)
+    text = chat_vision(settings, model, _vlm_prompt(technical), image_b64,
+                       selection=selection, audit=transport)
     data = _extract_json(text)
-    return _critique_from_dict(data, source="ollama")
+    source = provider_from(selection, transport)
+    remote = _critique_from_dict(data, source=source)
+    remote.transport_audit = transport
+    return remote
 
 
 def grok_critique(
@@ -316,35 +356,9 @@ def grok_critique(
     preview_path: Path,
     technical: TechnicalReport,
 ) -> Critique:
-    import base64
-
-    from openai import OpenAI
-
-    image_b64 = base64.b64encode(preview_path.read_bytes()).decode("ascii")
-    data_url = f"data:image/jpeg;base64,{image_b64}"
-    prompt = _vlm_prompt(technical)
-
-    client = OpenAI(
-        api_key=settings.xai_api_key,
-        base_url=settings.xai_base_url,
-        timeout=90.0,
-    )
-    response = client.responses.create(
-        model=settings.xai_model,
-        store=False,
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_image", "image_url": data_url, "detail": "high"},
-                    {"type": "input_text", "text": prompt},
-                ],
-            }
-        ],
-    )
-    text = getattr(response, "output_text", None) or _output_text_fallback(response)
-    data = _extract_json(text)
-    return _critique_from_dict(data, source="grok")
+    """Compatibility wrapper for callers explicitly requesting the xAI backend."""
+    configured = settings.model_copy(update={"vision_provider": "xai"})
+    return ollama_critique(configured, preview_path, technical, configured.xai_model)
 
 
 def compose_look_ids(
@@ -491,7 +505,8 @@ def _critique_from_dict(data: dict[str, Any], source: str) -> Critique:
         do_not=[str(x) for x in (data.get("do_not") or [])][:6],
         correction=correction,
         looks=looks,
-        source=source if source in {"ollama", "grok", "local"} else "local",
+        source=source if source in {"ollama", "grok", "openai", "xai", "vault", "local"} else "local",
+        vision_provider="xai" if source == "grok" else source,
         lut_mix=float(np.clip(lut_mix, 0.25, 0.8)),
         geometry=geometry,
         clutter=clutter,
@@ -608,9 +623,8 @@ def _format_critique_error(exc: Exception) -> str:
         token in msg for token in ("Expecting", "Unterminated", "delimiter", "no JSON")
     ):
         return "模型输出不是完整 JSON（多半被截断）"
-    if len(msg) > 120:
-        return msg[:117] + "…"
-    return msg
+    # Validation/transport messages can echo provider responses or signed URLs.
+    return type(exc).__name__
 
 
 _SMART_QUOTES = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"})

@@ -60,7 +60,7 @@ def main():
         rendered.raise_for_status()
         data = Path.home() / "Library/Application Support/SuperPhoto/data"
         folder = data / "jobs" / str(args.job) / "refinements" / rid
-        audit = json.loads((folder / "audit.json").read_text())
+        audit = json.loads((folder / "audit.json").read_text(encoding="utf-8"))
         assert rendered.content == Path(audit["lightroom"]["export"]).read_bytes()
         from superphoto.lightroom_qa import render_distance
         from superphoto.refinement import change_summary

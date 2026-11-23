@@ -19,6 +19,8 @@ class _FakeClient:
 
 
 def _report(*, accepted: bool = True, score: float = 96.0, issues: list | None = None):
+    issues = [issue if hasattr(issue, "code") else SimpleNamespace(code="test_damage", **vars(issue))
+              for issue in (issues or [])]
     return SimpleNamespace(
         accepted=accepted,
         score=score,
@@ -299,7 +301,7 @@ def test_similarity_retries_preserve_first_valid_design_and_finish_c(tmp_path, m
     settings, conn, _, _, root, _ = args
     saved = get_variants(conn, "similar")
     assert [v["slot"] for v in saved] == ["A", "B", "C"]
-    audit = json.loads((root / "lightroom-audits/variant_B.json").read_text())
+    audit = json.loads((root / "lightroom-audits/variant_B.json").read_text(encoding="utf-8"))
     assert audit["candidate_selection"]["distinct"] is False
     assert audit["candidate_selection"]["selected_round"] == selected
     assert audit["candidate_selection"]["fallback_policy"] == "first_valid_design"
@@ -320,7 +322,7 @@ def test_higher_passing_qa_score_and_larger_difference_do_not_prove_an_aesthetic
     args = _similar_candidate_job(tmp_path, monkeypatch, [1., 2., 3., 4.], scores=[96., 98., 99., 100.])
     _render_variants_with_lightroom(*args)
     root = args[4]
-    audit = json.loads((root / "lightroom-audits/variant_B.json").read_text())
+    audit = json.loads((root / "lightroom-audits/variant_B.json").read_text(encoding="utf-8"))
     assert audit["accepted_score"] == 96
     assert audit["candidate_selection"]["selected_round"] == 0
     assert (root / "variant_B.jpg").read_bytes() == Path(audit["rounds"][0]["export"]).read_bytes()
@@ -338,11 +340,11 @@ def test_similarity_fallback_never_delivers_quality_rejections(tmp_path, monkeyp
     _render_variants_with_lightroom(*args)
     root = args[4]
     assert not (root / "variant_B.jpg").exists()
-    audit = json.loads((root / "lightroom-audits/variant_B.json").read_text())
+    audit = json.loads((root / "lightroom-audits/variant_B.json").read_text(encoding="utf-8"))
     assert audit["status"] == "failed"
     assert [row["slot"] for row in get_variants(args[1], "similar")] == ["A", "C"]
     assert (root / "variant_C.jpg").is_file()
-    summary = json.loads((root / "lightroom-qa.json").read_text())
+    summary = json.loads((root / "lightroom-qa.json").read_text(encoding="utf-8"))
     assert summary["delivery"]["delivered"] == 2
     assert summary["delivery"]["omitted"][0]["slot"] == "B"
 
@@ -368,7 +370,7 @@ def test_one_native_render_error_keeps_other_completed_directions(tmp_path, monk
     monkeypatch.setattr(pipeline, "apply_recipe_pass", render_with_failure)
     _render_variants_with_lightroom(*args)
     assert [row["slot"] for row in get_variants(args[1], "similar")] == ["A", "C"]
-    audit = json.loads((args[4] / "lightroom-audits/variant_B.json").read_text())
+    audit = json.loads((args[4] / "lightroom-audits/variant_B.json").read_text(encoding="utf-8"))
     assert audit["status"] == "failed" and "did not read back" in audit["reason"]
 
 
@@ -376,7 +378,7 @@ def test_optional_diversity_export_failure_preserves_valid_candidate(tmp_path, m
     args = _similar_candidate_job(tmp_path, monkeypatch, [1.99] * 4, broken_export=True)
     _render_variants_with_lightroom(*args)
     root = args[4]
-    audit = json.loads((root / "lightroom-audits/variant_B.json").read_text())
+    audit = json.loads((root / "lightroom-audits/variant_B.json").read_text(encoding="utf-8"))
     assert audit["candidate_selection"]["selected_round"] == 0
     assert audit["rounds"][-1]["error"] == "optional export failed"
     assert (root / "variant_C.jpg").is_file()
@@ -403,7 +405,7 @@ def test_selected_presets_share_quality_policy_and_repair_their_own_curves(tmp_p
         return _report(accepted=not rejected, issues=[SimpleNamespace(note="too strong")] if rejected else [])
     monkeypatch.setattr("superphoto.pipeline.assess_lightroom_render", quality)
     _render_variants_with_lightroom(*args)
-    audit = json.loads((root / f"lightroom-audits/variant_{failed_slot}.json").read_text())
+    audit = json.loads((root / f"lightroom-audits/variant_{failed_slot}.json").read_text(encoding="utf-8"))
     assert audit["rounds"][1]["mode"] == "preset-strength-replacement"
     middle = audit["accepted_recipe"]["curve"]["rgb"][2][1]
     assert middle == pytest.approx(.5 + (curves[failed_slot][2][1] - .5) * .60)

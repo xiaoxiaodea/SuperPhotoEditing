@@ -12,9 +12,11 @@ import numpy as np
 
 from .look_routes import route_similarity, route_when
 from .models import Critique, StyleMatch, TechnicalReport
+from .resource_knowledge import RESOURCE_FAMILIES, RESOURCE_LESSONS, resource_incompatibility
 
 
 FAMILIES = {
+    **RESOURCE_FAMILIES,
     "faithful": "natural", "celebrity_rescue": "natural",
     "filmic_portrait_warm": "warm_portrait", "kdrama_tears": "warm_portrait",
     "romance_gold": "gold", "cinematic_teal_orange": "cinema", "jujutsu": "cinema",
@@ -58,6 +60,8 @@ def scene_context(critique: Critique, t: TechnicalReport) -> dict[str, bool]:
 
 
 def incompatibility(look_id: str, c: dict, t: TechnicalReport, critique: Critique) -> str:
+    if look_id in RESOURCE_FAMILIES:
+        return resource_incompatibility(look_id, critique, t)
     if look_id == "dune" and not c["desert"]:
         return "缺少沙漠或干燥暖土色场景；不能仅凭暖色像素套沙丘。"
     if look_id == "hanabi" and not c["fireworks"]:
@@ -120,6 +124,8 @@ def rank_presets(t: TechnicalReport, critique: Critique, *, feedback: dict | Non
             fit = celebrity[lid].score
         else:
             fit = .20 + .60 * (measured if measured is not None else .35) + (.12 if genre_fit else -.06)
+        if lid in RESOURCE_FAMILIES:
+            fit = {"resource_snow": .82, "resource_night": .72, "resource_matte": .62}[lid]
         # Context has priority over a similar histogram or a generic VLM name.
         semantic = 0.0
         if (lid == "dune" and context["desert"]) or (lid == "hanabi" and context["fireworks"]):
@@ -145,8 +151,9 @@ def rank_presets(t: TechnicalReport, critique: Critique, *, feedback: dict | Non
         if preference:
             reason += " 已参考相似画面的满意度反馈。"
         ranked.append(StyleMatch(look_id=lid, title=look.title, match_score=round(score, 4),
-            family=FAMILIES.get(lid, lid), source="study_recipe" if lid in celebrity else look.source,
-            reason=reason, evidence={"scene_fit": round(fit, 4), "semantic": semantic,
+            family=FAMILIES.get(lid, lid), source="study_recipe" if lid in celebrity or lid in RESOURCE_FAMILIES else look.source,
+            reason=reason, resource_lesson_ids=[RESOURCE_LESSONS[lid]] if lid in RESOURCE_LESSONS else [],
+            evidence={"scene_fit": round(fit, 4), "semantic": semantic,
                 "vision": vision, "preference": round(preference, 4),
                 **({"practice_similarity": round(measured, 4)} if measured is not None else {})}))
     ranked.sort(key=lambda item: (-item.match_score, item.look_id))
@@ -156,15 +163,18 @@ def rank_presets(t: TechnicalReport, critique: Critique, *, feedback: dict | Non
 def select_diverse_presets(ranked: list[StyleMatch], critique: Critique, t: TechnicalReport) -> list[StyleMatch]:
     """Prefer compatible, genuinely different recipes; never randomize by job ID."""
     from .directions import _signature, _signature_distance, preset_direction
-    from .preference import honor_locked_controls
+    from .preference import honor_locked_controls, correction_recipe
+    from .exposure import merge_correction_style, preserve_exposure_correction
     from .workflow import apply_ethics, ethics_regime_for, guard_hues
 
+    primary = correction_recipe(critique.correction, t, critique.intent)
     selected, signatures = [], []
     remaining = list(ranked)
     while remaining and len(selected) < 3:
         scored = []
         for match in remaining:
-            recipe = preset_direction("ABC"[len(selected)], match.look_id, critique, t).recipe
+            style = preset_direction("ABC"[len(selected)], match.look_id, critique, t).recipe
+            recipe = preserve_exposure_correction(merge_correction_style(primary, style, t), primary, t)
             ethics = ethics_regime_for(critique.genre)
             recipe = honor_locked_controls(apply_ethics(guard_hues(recipe, t, ethics), ethics), critique.intent)
             sig = _signature(recipe, full=True)

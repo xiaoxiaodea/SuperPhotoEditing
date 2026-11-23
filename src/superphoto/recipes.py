@@ -155,7 +155,9 @@ LOOKS = {**LOOKS, **load_xmp_looks()}
 # Lightroom-oriented recipes and routing rules can evolve independently.
 from .celebrity_styles import CELEBRITY_LOOKS  # noqa: E402
 
-LOOKS = {**LOOKS, **CELEBRITY_LOOKS}
+from .resource_knowledge import RESOURCE_LOOKS  # noqa: E402
+
+LOOKS = {**LOOKS, **CELEBRITY_LOOKS, **RESOURCE_LOOKS}
 
 
 def get_look(look_id: str) -> Look:

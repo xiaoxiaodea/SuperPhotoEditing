@@ -17,8 +17,8 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     root = args.data / "jobs" / str(args.job_id)
-    critique = Critique.model_validate_json((root / "critique.json").read_text())
-    audit = json.loads((root / f"lightroom-audits/variant_{args.slot}.json").read_text())
+    critique = Critique.model_validate_json((root / "critique.json").read_text(encoding="utf-8"))
+    audit = json.loads((root / f"lightroom-audits/variant_{args.slot}.json").read_text(encoding="utf-8"))
     before = root / "lightroom-exports/baseline/baseline.jpg"
     after = Path(audit.get("accepted_export") or audit["rounds"][-1]["export"])
     result = review_render(get_settings(), before, after, critique.intent, "final")

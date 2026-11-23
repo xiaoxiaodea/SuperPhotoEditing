@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validat
 from .config import Settings
 from .critique import _extract_json
 from .models import EditIntent, HueName, HueShift, MaskAdjustment, Recipe
-from .ollama import chat_vision, probe
+from .vision import chat_vision, probe, provider_from, safe_error
 from .pair_review import PairJudgment, compare_finished_pair
 from .review import _preview
 
@@ -101,6 +101,7 @@ class FinishingProposal(BaseModel):
     recipe: Recipe | None = None
     notes: list[str] = Field(default_factory=list)
     raw_response: str | None = None
+    transport_audit: dict = Field(default_factory=dict)
 
 
 class FinishingEvidence(_Response):
@@ -227,10 +228,12 @@ def propose_finishing(settings: Settings, original: Path, current: Path, recipe:
     if not settings.visual_review_enabled:
         return FinishingProposal(notes=["成片精修复核未启用"])
     raw_response = None
+    transport_audit: dict = {}
     try:
         status = probe(settings)
         if not status.get("ready") or not status.get("resolved_model"):
-            return FinishingProposal(notes=["视觉模型不可用，保留当前成片"])
+            return FinishingProposal(notes=["视觉模型不可用，保留当前成片"],
+                                     transport_audit={"selection": status})
         prompt = f"""请直接检查这张当前成片，判断它作为一张独立照片还欠缺什么。
 先观察主要区域的明暗、颜色、质感与主体关系，再决定是否值得小范围精修。
 observations 必须写出至少一条具体区域的真实观察；不要只说干净、自然、专业。
@@ -253,12 +256,13 @@ contrast/whites/highlights ±0.20，其余只作小调整。只写变化字段�
 {recipe.model_dump_json(exclude_defaults=True, exclude_none=True)}
 /no_think"""
         raw_response = chat_vision(
-            settings, status["resolved_model"], prompt, [_preview(current)])
+            settings, status["resolved_model"], prompt, [_preview(current)],
+            audit=transport_audit, selection=status)
         response = _ProposalResponse.model_validate(_extract_json(raw_response))
-        proposal = FinishingProposal(source="ollama", confidence=response.confidence,
+        proposal = FinishingProposal(source=provider_from(status, transport_audit), confidence=response.confidence,
                                      observations=response.observations, weaknesses=response.weaknesses,
                                      notes=response.notes,
-                                     raw_response=raw_response)
+                                     raw_response=raw_response, transport_audit=transport_audit)
         if not response.weaknesses or response.confidence < .70:
             proposal.notes.append("没有足够明确的剩余问题，保留当前成片")
             return proposal
@@ -267,8 +271,9 @@ contrast/whites/highlights ±0.20，其余只作小调整。只写变化字段�
             proposal.notes.append("约束后没有有效调整，保留当前成片")
         return proposal
     except Exception as exc:
-        return FinishingProposal(notes=[f"成片精修建议不可用：{type(exc).__name__}；保留当前成片"],
-                                 raw_response=raw_response)
+        transport_audit["stage_error"] = {"type": type(exc).__name__}
+        return FinishingProposal(notes=[f"成片精修建议不可用：{safe_error(exc)}；保留当前成片"],
+                                 raw_response=raw_response, transport_audit=transport_audit)
 
 
 def compare_finishing(settings: Settings, before: Path, after: Path,

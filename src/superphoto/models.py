@@ -123,6 +123,8 @@ class EditIntent(BaseModel):
     masks: list[MaskAdjustment] = Field(default_factory=list, max_length=3)
     reference_ids: list[str] = Field(default_factory=list, max_length=3)
     reference_checks: list[str] = Field(default_factory=list, max_length=4)
+    resource_lesson_ids: list[str] = Field(default_factory=list, max_length=12)
+    resource_checks: list[str] = Field(default_factory=list, max_length=4)
 
 
 class ParametricTone(BaseModel):
@@ -458,7 +460,10 @@ class ArtDirection(BaseModel):
     goal: str
     moves: list[str] = Field(default_factory=list, max_length=5)
     recipe: Recipe = Field(default_factory=Recipe)
-    source: Literal["ollama", "scene"] = "scene"
+    resource_adjustments: list[dict] = Field(default_factory=list)
+    source: Literal["ollama", "openai", "xai", "vault", "scene"] = "scene"
+    vision_provider: str = ""
+    transport_audit: dict = Field(default_factory=dict)
 
 
 class Critique(BaseModel):
@@ -468,7 +473,11 @@ class Critique(BaseModel):
     do_not: list[str] = Field(default_factory=list)
     correction: CorrectionHint = Field(default_factory=CorrectionHint)
     looks: list[str] = Field(default_factory=list)
-    source: Literal["ollama", "grok", "local"] = "local"
+    # grok remains valid for previously saved jobs; new calls use actual providers.
+    # vault is a model configured in the client; its identity stays in the vault.
+    source: Literal["ollama", "grok", "openai", "xai", "vault", "local"] = "local"
+    vision_provider: str = ""
+    transport_audit: dict = Field(default_factory=dict)
     lut_mix: float = 0.55
     geometry: GeometryHint = Field(default_factory=GeometryHint)
     clutter: list[RegionBox] = Field(default_factory=list)
@@ -500,6 +509,14 @@ class TechnicalReport(BaseModel):
     highlight_p95: float = 1.0
     exif: dict[str, str] = Field(default_factory=dict)
     suggested_exposure_ev: float = 0.0
+    # Linear-light measurements excluding clipped channels and deep shadows.
+    # None distinguishes old reports from measured zero; white areas alone do
+    # not establish that the remaining subject is overexposed.
+    unclipped_fraction: float = 0.0
+    unclipped_median_luma: float | None = None
+    white_clip_fraction: float = 0.0
+    chromatic_fraction: float = 0.0
+    chromatic_median_luma: float | None = None
     aqua_fraction: float = 0.0
     magenta_fraction: float = 0.0
     orange_fraction: float = 0.0
@@ -524,6 +541,7 @@ class StyleMatch(BaseModel):
     family: str = ""
     source: str = ""
     evidence: dict[str, float] = Field(default_factory=dict)
+    resource_lesson_ids: list[str] = Field(default_factory=list, max_length=12)
 
 
 class StyleDecision(BaseModel):

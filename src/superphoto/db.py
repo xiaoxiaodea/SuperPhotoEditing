@@ -102,14 +102,15 @@ def tx(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         raise
 
 
-def insert_job(conn: sqlite3.Connection, job_id: str, original_name: str) -> None:
+def insert_job(conn: sqlite3.Connection, job_id: str, original_name: str,
+               original_file: str | None = None) -> None:
     now = utcnow()
     conn.execute(
         """
-        INSERT INTO jobs (id, status, step, original_name, created_at, updated_at)
-        VALUES (?, 'queued', 'queued', ?, ?, ?)
+        INSERT INTO jobs (id, status, step, original_name, original_file, created_at, updated_at)
+        VALUES (?, 'queued', 'queued', ?, ?, ?, ?)
         """,
-        (job_id, original_name, now, now),
+        (job_id, original_name, original_file, now, now),
     )
     conn.commit()
 

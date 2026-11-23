@@ -52,7 +52,7 @@ def load_verified_job(job: Path, slot: str) -> dict:
     """Reject local previews, stale sidecars and unpaired native exports."""
     job = job.resolve()
     audit_path = job / "lightroom-audits" / f"variant_{slot}.json"
-    audit = json.loads(audit_path.read_text())
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
     if audit.get("status") == "failed":
         raise ValueError("The requested slot did not deliver a native Lightroom result")
     delivered = job / f"variant_{slot}.jpg"
@@ -60,7 +60,7 @@ def load_verified_job(job: Path, slot: str) -> dict:
     native_photo = Path(audit["accepted_photo"]).resolve()
     baseline = Path(audit["baseline_export"]).resolve()
     sidecar_path = job / f"variant_{slot}.json"
-    sidecar = json.loads(sidecar_path.read_text())
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
     recipe = Recipe.model_validate(audit["accepted_recipe"])
     if recipe != Recipe.model_validate(sidecar):
         raise ValueError("The delivered recipe differs from the accepted native audit")
@@ -76,13 +76,13 @@ def load_verified_job(job: Path, slot: str) -> dict:
     if not baseline.is_file():
         raise ValueError("The original native baseline export is missing")
     summary_path = job / "lightroom-qa.json"
-    summary = json.loads(summary_path.read_text())
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
     if summary.get("slots", {}).get(slot, {}).get("status") != "delivered":
         raise ValueError("The job summary does not confirm delivery of this slot")
     if sidecar.get("intent"):
         intent = EditIntent.model_validate(sidecar["intent"])
     elif (job / "critique.json").is_file():
-        intent = EditIntent.model_validate(json.loads((job / "critique.json").read_text())["intent"])
+        intent = EditIntent.model_validate(json.loads((job / "critique.json").read_text(encoding="utf-8"))["intent"])
     else:
         raise ValueError("The delivered result has no recorded photographic intent")
     return {"job": job, "slot": slot, "original": original, "baseline": baseline,

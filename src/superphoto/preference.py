@@ -32,11 +32,12 @@ def build_plans(
     look_ids: list[str],
     critique: Critique,
     technical: TechnicalReport,
+    *, slots: tuple[str, ...] = ("A", "B", "C"),
 ) -> list[VariantPlan]:
-    correction = sanitize_correction(critique.correction, technical).as_recipe()
+    from .exposure import merge_correction_style
+    correction = correction_recipe(critique.correction, technical, critique.intent)
     correction = correction.model_copy(update={"masks": [m.model_copy(deep=True) for m in critique.intent.masks]})
     ethics = ethics_regime_for(critique.genre)
-    slots = ("A", "B", "C")
     plans: list[VariantPlan] = []
     for slot, look_id in zip(slots, look_ids, strict=False):
         look = get_look(look_id)
@@ -46,7 +47,7 @@ def build_plans(
             if direction.look_id and direction.look_id != look_id:
                 raise ValueError(f"{slot}: direction preset {direction.look_id} differs from selected {look_id}")
             direction = bound_direction(direction, critique, technical)
-            recipe = correction.merged(direction.recipe).clamped()
+            recipe = merge_correction_style(correction, direction.recipe, technical)
             # RAW recovery is the common correction beneath the three looks.
             # Do not let a weaker sky style erase the diagnosis's paired light
             # controls. Keep any scene-specific local color choices.
@@ -59,6 +60,8 @@ def build_plans(
                             for key in ("exposure_ev", "contrast", "whites", "blacks", "highlights", "shadows"):
                                 setattr(mask, key, getattr(recovery, key))
                             mask.reason = recovery.reason
+            from .exposure import preserve_exposure_correction
+            recipe = preserve_exposure_correction(recipe, correction, technical)
             recipe = honor_locked_controls(apply_ethics(guard_hues(recipe, technical, ethics), ethics), critique.intent)
             recipe.masks = [m.for_source(technical.source_kind) for m in recipe.masks]
             intent = critique.intent.model_copy(update={"goal": direction.goal, "masks": recipe.masks})
@@ -88,7 +91,9 @@ def build_plans(
         look_recipe = _scale_recipe(base_recipe, amount)
         look_recipe = _fit_lut_to_scene(look_recipe, look.id, technical)
         look_recipe = protect_look(look_recipe, critique.intent)
-        recipe = _adapt_to_scene(correction.merged(look_recipe), technical, look_id)
+        from .resource_knowledge import apply_resource_guards
+        look_recipe = apply_resource_guards(look_recipe, critique, technical)
+        recipe = _adapt_to_scene(merge_correction_style(correction, look_recipe, technical), technical, look_id)
         recipe = recipe.model_copy(
             update={
                 "local": recipe.local.merged(
@@ -101,6 +106,8 @@ def build_plans(
                 )
             }
         ).clamped()
+        from .exposure import preserve_exposure_correction
+        recipe = preserve_exposure_correction(recipe, correction, technical)
         recipe = honor_locked_controls(apply_ethics(guard_hues(recipe, technical, ethics), ethics), critique.intent)
         recipe.masks = [m.for_source(technical.source_kind) for m in recipe.masks]
         geom = suggest_geometry(technical, critique.genre, slot)
@@ -153,6 +160,9 @@ def reduce_style_strength(recipe: Recipe, primary: Recipe, amount: float) -> Rec
     residual = _delta_recipe(recipe, primary)
     residual.masks = []
     result = primary.merged(_scale_recipe(residual, amount))
+    if not primary.curve.is_identity():
+        from .exposure import blend_tone_curves
+        result.curve = blend_tone_curves(primary.curve, recipe.curve, float(np.clip(amount, 0, 1)))
     result.masks = [m.model_copy(deep=True) for m in recipe.masks]
     for key in ("detail", "optics", "crop"):
         setattr(result, key, getattr(recipe, key).model_copy(deep=True))
@@ -270,9 +280,13 @@ def sanitize_correction(hint: CorrectionHint, technical: TechnicalReport) -> Cor
     developed = technical.source_kind in {"jpeg", "png"}
     low_key = technical.mean_luma < 0.12 and technical.shadow_clip > 0.12
     if developed:
-        data["exposure_ev"] = float(np.clip(data["exposure_ev"], -0.30, 0.22))
+        from .exposure import developed_overexposure, deep_low_key_headroom, developed_lift_ev
+        floor = -.8 if developed_overexposure(technical) else -.30
+        measured_lift = developed_lift_ev(technical)
+        ceiling = (max(.22, measured_lift) if measured_lift > 0 else
+                   .45 if deep_low_key_headroom(technical) else (.06 if low_key else .22))
+        data["exposure_ev"] = float(np.clip(data["exposure_ev"], floor, ceiling))
         if low_key:
-            data["exposure_ev"] = min(data["exposure_ev"], 0.06)
             data["shadows"] = min(data["shadows"], 0.08)
             data["contrast"] = min(data["contrast"], 0.04)
             data["saturation"] = min(data["saturation"], 0.03)
@@ -293,6 +307,21 @@ def sanitize_correction(hint: CorrectionHint, technical: TechnicalReport) -> Cor
         if technical.highlight_p95 > .93:
             data["whites"] = min(data["whites"], 0.0)
     return CorrectionHint.model_validate(data)
+
+
+def correction_recipe(hint: CorrectionHint, technical: TechnicalReport, intent: EditIntent | None = None) -> Recipe:
+    """Build shared correction; clipped developed whites need an anchored curve."""
+    from .exposure import developed_overexposure, white_preserving_curve
+    recipe = sanitize_correction(hint, technical).as_recipe()
+    if (developed_overexposure(technical) and technical.white_clip_fraction >= .03
+            and recipe.exposure_ev < -.30
+            and not (intent and "exposure_ev" in intent.locked_controls)):
+        recipe.curve = white_preserving_curve(recipe.exposure_ev)
+        recipe.exposure_ev = 0.0
+        recipe.highlights = 0.0
+        recipe.whites = 0.0
+        recipe.contrast = 0.0
+    return recipe
 
 
 def _fit_lut_to_scene(recipe: Recipe, look_id: str, technical: TechnicalReport) -> Recipe:

@@ -143,6 +143,7 @@ def _practice_looks():
 
 def finishing_context(critique: Critique, technical: TechnicalReport, *, methods=None) -> dict:
     from .master_studies import study_context
+    from .resource_knowledge import resource_context
     scores = sorted(((route_similarity(lid, technical) or 0, lid) for lid in _practice_looks()), reverse=True)
     hints = []
     for score, lid in scores[:2]:
@@ -153,7 +154,8 @@ def finishing_context(critique: Critique, technical: TechnicalReport, *, methods
                       "palette": look.description,
                       "hsl_example": {k: v.model_dump() for k, v in look.recipe.hsl.items()}})
     return {
-        "version": 2, "sources": SOURCES,
+        "version": 3, "sources": SOURCES,
+        "resource_materials": resource_context(critique, technical),
         "verified_workflows": [
             {"author": "Scott Kelby", "source": "https://lightroomkillertips.com/seven-clicks-to-done-lightroom-before-and-after-step-by-step/",
              "evidence": "公开 RAW 与步骤截图；天空局部曝光 -1.58、对比 +36、白色 +72。",

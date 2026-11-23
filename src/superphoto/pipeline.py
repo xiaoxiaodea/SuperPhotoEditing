@@ -32,6 +32,8 @@ from .lightroom_qa import (
     blend_recipes,
     correction_for_report,
     is_distinct_candidate,
+    needs_color_repair,
+    reduce_color_cast,
     separate_candidate_recipe,
 )
 from .models import Critique, CropControls, DetailControls, EditIntent, OpticsControls, Recipe
@@ -78,6 +80,11 @@ def run_job(settings: Settings, conn: sqlite3.Connection, job_id: str, original:
         export_srgb_jpeg(working, root / "source_preview.jpg", quality=88, max_edge=settings.preview_edge)
         export_srgb_jpeg(working, root / "critique_preview.jpg", quality=82, max_edge=settings.critique_edge)
 
+        if baseline_result and _run_directed(settings, conn, job_id, original, root, technical,
+                                             Path(baseline_result["export"])):
+            update_job(conn, job_id, status="ready", step="ready", error=None)
+            return
+
         # Axis A: technical restoration only. Color and global tone are frozen,
         # then a dedicated gate decides whether the stage is safe to keep.
         update_job(conn, job_id, step="restore")
@@ -101,6 +108,11 @@ def run_job(settings: Settings, conn: sqlite3.Connection, job_id: str, original:
         update_job(conn, job_id, step="critique", technical_json=technical.model_dump_json())
         critique = critique_photo(settings, root / "critique_preview.jpg", technical)
         from .master_studies import study_context
+        from .resource_knowledge import resource_context
+        resources = resource_context(critique, technical)
+        critique.intent.resource_lesson_ids = [lesson["id"] for lesson in resources["lessons"]]
+        critique.intent.resource_checks = resources["review_checks"]
+        (root / "resource-guidance.json").write_text(json.dumps(resources, ensure_ascii=False, indent=2), encoding="utf-8")
         references = study_context(critique, technical)
         critique.intent.reference_ids = [r["id"] for r in references["references"]]
         critique.intent.reference_checks = references["review_checks"]
@@ -338,7 +350,10 @@ def _adaptation_notes(recipe: Recipe, technical) -> list[str]:
     notes: list[str] = ["没有照搬示范数值；先按当前直方图限制曝光、黑位和高光。"]
     if technical.source_kind in {"jpeg", "png"}:
         notes.append("输入已经显影，降低了曝光、清晰度、去雾和整体风格强度，避免二次 HDR。")
-    if technical.highlight_clip > 0.01 or technical.highlight_p95 > 0.92:
+    from .exposure import developed_overexposure
+    if developed_overexposure(technical) and technical.white_clip_fraction >= .03 and not recipe.curve.is_identity():
+        notes.append("用保留白端的共享曲线校正有效区域曝光；原片纯白区没有可恢复的纹理，不把压灰当成恢复。")
+    elif technical.highlight_clip > 0.01 or technical.highlight_p95 > 0.92:
         notes.append("高光接近上限，因此进一步压低高光/白色色阶。")
     if technical.saturation_mean > 0.42:
         notes.append("原片饱和不低，先减容易脏的颜色，再保留自然饱和度。")
@@ -347,6 +362,46 @@ def _adaptation_notes(recipe: Recipe, technical) -> list[str]:
     if not recipe.curve.is_identity():
         notes.append("曲线先于基本滑杆定调，并控制为少锚点平滑过渡。")
     return notes
+
+
+def _run_directed(settings: Settings, conn: sqlite3.Connection, job_id: str, original: Path, root: Path,
+                  technical, baseline_export: Path) -> bool:
+    """Run the vision-directed LightCraft path; False means use the legacy pipeline.
+
+    auto falls back when no vision model is ready or nothing passes; directed
+    raises instead, so a misconfiguration is visible rather than silently legacy.
+    """
+    from .directed import DirectedUnavailable, directed_selection, run_directed_job
+
+    if settings.pipeline_mode == "legacy":
+        return False
+    update_job(conn, job_id, technical_json=technical.model_dump_json())
+    selection = directed_selection(settings)
+    reason = None
+    if selection is None:
+        reason = "没有可用的视觉模型（需要 Ollama 或已配置密钥的云端模型）"
+    else:
+        try:
+            run_directed_job(settings, conn, job_id, original, root, technical=technical,
+                             baseline_export=baseline_export, selection=selection)
+            return True
+        except DirectedUnavailable as exc:
+            reason = str(exc)
+        except Exception as exc:
+            if settings.pipeline_mode == "directed":
+                raise
+            # auto keeps the job alive on an unexpected failure; the trace stays on disk.
+            reason = f"{type(exc).__name__}: {exc}"
+            (root / "directed-error.txt").write_text(traceback.format_exc(), encoding="utf-8")
+    if settings.pipeline_mode == "directed":
+        raise DirectedUnavailable(reason)
+    (root / "directed-fallback.json").write_text(json.dumps(
+        {"pipeline_mode": settings.pipeline_mode, "fallback": "legacy", "reason": reason},
+        ensure_ascii=False, indent=2), encoding="utf-8")
+    # A failed directed attempt may have written variants or audits; legacy replaces them.
+    replace_variants(conn, job_id, [])
+    shutil.rmtree(root / "lightroom-audits", ignore_errors=True)
+    return False
 
 
 def _connected_lightroom(settings: Settings):
@@ -376,6 +431,7 @@ class _ValidCandidate:
     distance: float | None
     round_index: int
     replaced: bool = False
+    design: dict | None = None
 
 def _render_variants_with_lightroom(
     settings: Settings,
@@ -426,15 +482,30 @@ def _render_variants_with_lightroom(
     if critique is not None and (root / "technical.json").is_file():
         from .models import TechnicalReport
         from .finishing_knowledge import method_ids
-        direction_technical = TechnicalReport.model_validate_json((root / "technical.json").read_text())
+        direction_technical = TechnicalReport.model_validate_json((root / "technical.json").read_text(encoding="utf-8"))
         direction_methods = dict(zip("ABC", method_ids(critique, direction_technical)))
         direction_methods.update({d.slot: d.method_id for d in critique.directions if d.method_id})
     for row in variants:
         method = json.loads(str(row["recipe_json"])).get("style_workflow", {}).get("method_id")
         if method:
             direction_methods[str(row["slot"])] = method
+    from .preference import correction_recipe
+    from .exposure import preserve_exposure_correction
+    shared_primary = (correction_recipe(critique.correction, direction_technical, critique.intent)
+                      if critique is not None and direction_technical is not None else Recipe())
+    from .exposure import developed_overexposure
+    exposure_recovery = (not shared_primary.curve.is_identity() or
+                         (direction_technical is not None and developed_overexposure(direction_technical)
+                          and shared_primary.exposure_ev < 0))
     safe_recipe: Recipe | None = None
     accepted_candidates: list[Path] = []
+    accepted_design_recipes: list[Recipe] = []
+    reserved_look_ids = {str(row['look_id']) for row in variants}
+    ranked_alternatives = []
+    if (root / 'style-decision.json').is_file():
+        from .models import StyleDecision
+        decision = StyleDecision.model_validate_json((root / 'style-decision.json').read_text(encoding='utf-8'))
+        ranked_alternatives = decision.ranked_candidates
     delivered_rows: list[dict[str, object]] = []
     omitted: list[dict[str, str]] = []
     lightroom_summary: dict[str, object] = {
@@ -446,8 +517,13 @@ def _render_variants_with_lightroom(
     }
     for row in variants:
         slot = str(row["slot"])
+        requested_look_id = str(row["look_id"])
         sidecar_intent = json.loads(str(row["recipe_json"])).get("intent")
         intent = EditIntent.model_validate(sidecar_intent) if sidecar_intent else default_intent
+        from .exposure import developed_lift_ev
+        exposure_lift_ev = (min(shared_primary.exposure_ev, developed_lift_ev(direction_technical))
+                            if direction_technical is not None and "exposure_ev" not in intent.locked_controls
+                            else 0.0)
         preset_mode = direction_methods.get(slot, "").startswith("preset:")
         creative_palette = preset_mode or (slot in {"B", "C"} and bool(critique and critique.directions))
         review_kwargs = {}
@@ -465,6 +541,8 @@ def _render_variants_with_lightroom(
         source_copy = inputs / f"variant_{slot}{suffix}"
         shutil.copy2(original, source_copy)
         recipe = Recipe.model_validate_json(str(row["recipe_json"]))
+        if direction_technical is not None:
+            recipe = honor_locked_controls(preserve_exposure_correction(recipe, shared_primary, direction_technical), intent)
         original_recipe = recipe.model_copy(deep=True)
         cumulative_recipe = Recipe()
         rounds: list[dict[str, object]] = []
@@ -474,6 +552,8 @@ def _render_variants_with_lightroom(
         best_valid: _ValidCandidate | None = None
         used_similarity_fallback = False
         selected_round: int | None = None
+        selected_design = None
+        attempted_alternatives = set(reserved_look_ids)
         last_report = None
         last_pass = None
         visual_review = VisualReview()
@@ -506,7 +586,9 @@ def _render_variants_with_lightroom(
                 slot=slot,
                 min_score=settings.lightroom_qa_min_score,
                 region_masks=quality_regions,
-                creative_palette=creative_palette,
+                creative_palette=creative_palette, exposure_recovery=exposure_recovery,
+                exposure_lift_ev=exposure_lift_ev,
+                natural_color=intent.natural_color, render_recipe=cumulative_recipe,
             )
             candidate_distinct = True
             visual_review = review_render(settings, baseline_export, Path(pass_result["export"]), intent, "final")
@@ -553,10 +635,18 @@ def _render_variants_with_lightroom(
                     continue
             if report.accepted and (not candidate_distinct or visual_review.rejects):
                 break
+            if needs_color_repair(report):
+                # Channel palettes are absolute curves: repair on a fresh source,
+                # rather than stacking a compensating global tint over this pass.
+                break
+            if exposure_recovery and any(issue.code in {"exposure_unresolved", "clipped_whites_greyed"} for issue in report.issues):
+                # These need a fresh render with the retained base curve, not
+                # a brightness delta accumulated over the rejected state.
+                break
             if attempt < settings.lightroom_qa_max_refinements:
                 recipe = honor_locked_controls(correction_for_report(report, strength=1.0 - attempt * 0.18), intent)
 
-        if accepted_export is None and not preset_mode and slot == "A" and last_report is not None and last_report.accepted and visual_review.rejects:
+        if accepted_export is None and not preset_mode and not exposure_recovery and slot == "A" and last_report is not None and last_report.accepted and visual_review.rejects:
             accepted_export, accepted_photo, accepted_recipe = baseline_export, baseline_copy, Recipe()
             last_report = assess_lightroom_render(baseline_export, baseline_export, slot=slot,
                                                   min_score=settings.lightroom_qa_min_score, region_masks=quality_regions)
@@ -567,7 +657,9 @@ def _render_variants_with_lightroom(
             row["why"] = "当前调整未改善画面，保留 LightCraft 自然基线。"
 
         replaced = False
-        if accepted_export is None and (preset_mode or (slot != "A" and safe_recipe is not None)) and render_error is None:
+        color_repair_base = (cumulative_recipe.model_copy(deep=True)
+                             if last_report is not None and needs_color_repair(last_report) else None)
+        if accepted_export is None and (preset_mode or color_repair_base is not None or (slot != "A" and safe_recipe is not None)) and render_error is None:
             # A quality failure may need a safer curve. A similar but valid
             # candidate needs its own light design, not A's curve again.
             base_weight = .60 if preset_mode else (0.40 if slot == "B" else 0.34)
@@ -577,11 +669,33 @@ def _render_variants_with_lightroom(
             separation_attempt = 0
             for rep_attempt in range(max_replacement_attempts):
                 weight = None
-                if separation_base is not None:
+                color_weight = None
+                alternative = None
+                design = None
+                if (separation_base is not None and preset_mode and rep_attempt >= 1
+                        and critique is not None and direction_technical is not None):
+                    from .candidate_design import alternative_preset_plan
+                    alternative = alternative_preset_plan(slot, ranked_alternatives, critique, direction_technical,
+                        excluded_ids=attempted_alternatives, accepted_recipes=accepted_design_recipes)
+                if color_repair_base is not None and separation_base is None:
+                    mode = "neutral-color-repair"
+                    color_weight = .5 ** (rep_attempt + 1)
+                    replacement = reduce_color_cast(color_repair_base, shared_primary, color_weight)
+                elif alternative is not None:
+                    mode = "preset-direction-replacement"
+                    attempted_alternatives.add(alternative.look_id)
+                    replacement = alternative.recipe.model_copy(deep=True)
+                    for control in ("detail", "optics", "crop"):
+                        setattr(replacement, control, getattr(original_recipe, control).model_copy(deep=True))
+                    design = {"look_id": alternative.look_id, "title": alternative.title,
+                              "why": alternative.why, "method_id": alternative.method_id,
+                              "preset_amount": alternative.lut_mix, "match_score": alternative.match_score}
+                elif separation_base is not None:
                     mode = "distinctness-replacement"
                     replacement = separate_candidate_recipe(separation_base, slot=slot, attempt=separation_attempt,
                                                             exposure_locked="exposure_ev" in intent.locked_controls,
-                                                            method=direction_methods.get(slot), technical=direction_technical)
+                                                            method=direction_methods.get(slot), technical=direction_technical,
+                                                            primary=shared_primary)
                     separation_attempt += 1
                 elif visual_review.rejects:
                     mode = "visual-damage-repair"
@@ -590,12 +704,19 @@ def _render_variants_with_lightroom(
                     mode = "preset-strength-replacement" if preset_mode else "safe-style-replacement"
                     weight = float(np.clip(base_weight - rep_attempt * weight_step, 0.10, 0.68))
                     if preset_mode:
-                        from .preference import reduce_style_strength, sanitize_correction
-                        primary = (sanitize_correction(critique.correction, direction_technical).as_recipe()
-                                   if critique is not None and direction_technical is not None else Recipe())
+                        from .preference import reduce_style_strength
+                        primary = shared_primary
                         replacement = reduce_style_strength(original_recipe, primary, weight)
                     else:
                         replacement = blend_recipes(safe_recipe, original_recipe, style_weight=weight)
+                resource_adjustments = []
+                if critique is not None and direction_technical is not None:
+                    from .resource_knowledge import apply_resource_guards
+                    primary = shared_primary
+                    replacement = apply_resource_guards(replacement, critique, direction_technical,
+                                                        primary=primary, audit=resource_adjustments)
+                if direction_technical is not None:
+                    replacement = preserve_exposure_correction(replacement, shared_primary, direction_technical)
                 replacement = honor_locked_controls(replacement, intent)
                 rep_suffix = f"_rep{rep_attempt}" if rep_attempt > 0 else ""
                 replacement_copy = inputs / f"variant_{slot}_replacement{rep_suffix}{suffix}"
@@ -621,7 +742,10 @@ def _render_variants_with_lightroom(
                     slot=slot,
                     min_score=settings.lightroom_qa_min_score,
                     region_masks=quality_regions,
-                    creative_palette=creative_palette,
+                    creative_palette=creative_palette, exposure_recovery=exposure_recovery,
+                    exposure_lift_ev=exposure_lift_ev,
+                    natural_color=intent.natural_color,
+                    render_recipe=Recipe.model_validate(replacement_result.get("effective_recipe", replacement.model_dump())),
                 )
                 replacement_review = review_render(settings, baseline_export, Path(replacement_result["export"]), intent, "final")
                 replacement_distinct = False
@@ -638,6 +762,9 @@ def _render_variants_with_lightroom(
                         "mode": mode,
                         "recipe": replacement.model_dump(),
                         "style_weight": weight,
+                        "color_style_weight": color_weight,
+                        "design": design,
+                        "resource_adjustments": resource_adjustments,
                         "settings_applied": replacement_result["settings"],
                         "professional_stages": replacement_result.get("stages", []),
                         "develop_before": replacement_result["develop_before"],
@@ -657,7 +784,7 @@ def _render_variants_with_lightroom(
                     candidate = _ValidCandidate(Path(replacement_result["export"]), replacement_copy,
                         Recipe.model_validate(replacement_result.get("effective_recipe", replacement.model_dump())),
                         replacement_report, replacement_result, replacement_review, replacement_distance,
-                        len(rounds) - 1, replaced=True)
+                        len(rounds) - 1, replaced=True, design=design)
                     # Technical acceptance is a gate. A larger distance from
                     # another slot, or a higher passing QA score, is not visual
                     # evidence that this replacement is a better photograph.
@@ -674,6 +801,7 @@ def _render_variants_with_lightroom(
                     visual_review = replacement_review
                     replaced = True
                     selected_round = len(rounds) - 1
+                    selected_design = design
                     break
 
         # Diversity is a selection target, not a pixel defect. Exhausting the
@@ -686,6 +814,7 @@ def _render_variants_with_lightroom(
             last_report, last_pass, visual_review = best_valid.report, best_valid.result, best_valid.review
             nearest_candidate_distance, selected_round = best_valid.distance, best_valid.round_index
             replaced = best_valid.replaced
+            selected_design = best_valid.design
 
         if accepted_export is None or accepted_photo is None or accepted_recipe is None or last_report is None or last_pass is None:
             issue_text = render_error or "、".join(issue.note for issue in (last_report.issues if last_report else []))
@@ -701,6 +830,11 @@ def _render_variants_with_lightroom(
             lightroom_summary["slots"][slot] = {"status": "withheld", "reason": issue_text, "rounds": len(rounds)}
             continue
 
+        if selected_design is not None:
+            row.update({key: selected_design[key] for key in ("look_id", "title", "why")})
+            direction_methods[slot] = selected_design["method_id"]
+            reserved_look_ids.add(selected_design["look_id"])
+
         # A safe first render is a retained candidate, not proof that the
         # intended light and color are finished. Refine from its EFFECTIVE
         # recipe on an independent source so a rejected attempt cannot mutate
@@ -712,6 +846,9 @@ def _render_variants_with_lightroom(
             for finishing_attempt in range(settings.finishing_max_rounds):
                 proposal = propose_finishing(settings, baseline_export, accepted_export,
                                              accepted_recipe, intent, source_kind)
+                if proposal.recipe is not None and direction_technical is not None:
+                    proposal.recipe = honor_locked_controls(preserve_exposure_correction(
+                        proposal.recipe, shared_primary, direction_technical), intent)
                 finishing_record = {"attempt": finishing_attempt, "proposal": proposal.model_dump(),
                                     "retained_export": str(accepted_export), "selected": False}
                 finishing_records.append(finishing_record)
@@ -728,7 +865,9 @@ def _render_variants_with_lightroom(
                     finishing_effective = Recipe.model_validate(finishing_result.get("effective_recipe", proposal.recipe.model_dump()))
                     finishing_report = assess_lightroom_render(baseline_export, finishing_export,
                         slot=slot, min_score=settings.lightroom_qa_min_score,
-                        region_masks=quality_regions, creative_palette=creative_palette,
+                        region_masks=quality_regions, creative_palette=creative_palette, exposure_recovery=exposure_recovery,
+                        exposure_lift_ev=exposure_lift_ev,
+                        natural_color=intent.natural_color, render_recipe=finishing_effective,
                         previous_accepted_path=accepted_export)
                     finishing_record.update(export=str(finishing_export), pixel_qa=finishing_report.to_dict())
                     finishing_comparison = None
@@ -767,6 +906,7 @@ def _render_variants_with_lightroom(
         if slot == "A":
             safe_recipe = accepted_recipe.model_copy(deep=True)
         accepted_candidates.append(accepted_export)
+        accepted_design_recipes.append(accepted_recipe.model_copy(deep=True))
 
         checkpoint = None
         checkpoint_error = None
@@ -785,6 +925,15 @@ def _render_variants_with_lightroom(
         shutil.copy2(accepted_export, final_path)
         sidecar_payload = json.loads(str(row["recipe_json"]))
         sidecar_payload.update(accepted_recipe.model_dump())
+        if selected_design is not None:
+            sidecar_payload["lut_mix"] = selected_design["preset_amount"]
+            sidecar_payload.setdefault("intent", {})["goal"] = selected_design["why"]
+            workflow = sidecar_payload.setdefault("style_workflow", {})
+            workflow.update(requested_preset_id=workflow.get("preset_id", requested_look_id),
+                method_id=selected_design["method_id"], preset_id=selected_design["look_id"],
+                preset_amount=selected_design["preset_amount"], match_score=selected_design["match_score"],
+                route_label=selected_design["title"], selection_reason=selected_design["why"],
+                replacement_reason="实际成片与其他候选过近，已从场景准入名单中改选预设")
         if visual_review.source == "retained-baseline":
             workflow = sidecar_payload.setdefault("style_workflow", {})
             workflow.update(requested_method_id=workflow.get("method_id"), method_id="", preset_id=None,
@@ -847,7 +996,10 @@ def _render_variants_with_lightroom(
         }
         delivered_rows.append(row)
     replace_variants(conn, job_id, delivered_rows)
-    lightroom_summary["delivery"] = {"requested": len(variants), "delivered": len(delivered_rows), "omitted": omitted}
+    similar_slots = [slot for slot, item in lightroom_summary["slots"].items()
+                     if item.get("status") == "delivered" and not item["candidate_selection"]["distinct"]]
+    lightroom_summary["delivery"] = {"requested": len(variants), "delivered": len(delivered_rows), "omitted": omitted,
+                                      "distinct_delivered": len(delivered_rows) - len(similar_slots), "similar_slots": similar_slots}
     (root / "lightroom-qa.json").write_text(
         json.dumps(lightroom_summary, indent=2, ensure_ascii=False), encoding="utf-8"
     )

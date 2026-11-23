@@ -125,7 +125,7 @@ def test_coverage_rejects_stale_or_invalid_records(tmp_path, monkeypatch):
 
 
 def test_bundled_index_is_complete_and_every_record_is_individually_valid():
-    payload = json.loads(Path(studies.__file__).with_name("master_studies.json").read_text())
+    payload = json.loads(Path(studies.__file__).with_name("master_studies.json").read_text(encoding="utf-8"))
     records, coverage = payload["records"], payload["coverage"]
     assert coverage["status"] == "complete" and coverage["pending"] == 0 and not coverage["invalid"]
     assert len(records) == coverage["analyzed"] == coverage["unique_images"]

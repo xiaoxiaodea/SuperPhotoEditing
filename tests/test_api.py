@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Event
+import time
 
 from fastapi.testclient import TestClient
 import pytest
@@ -93,9 +94,15 @@ def test_health_and_full_loop(tmp_path: Path, monkeypatch, scene: Path) -> None:
         assert created.status_code == 200, created.text
         job_id = created.json()["id"]
 
-        job = client.get(f"/api/jobs/{job_id}")
-        assert job.status_code == 200
-        payload = job.json()
+        deadline = time.monotonic() + 30
+        while True:
+            job = client.get(f"/api/jobs/{job_id}")
+            assert job.status_code == 200
+            payload = job.json()
+            if payload["status"] not in {"queued", "running"}:
+                break
+            assert time.monotonic() < deadline, payload
+            Event().wait(.02)
         assert payload["status"] == "ready"
         assert len(payload["variants"]) == 3
         assert payload["variants"][0]["moves"] == payload["variants"][0]["recipe"]["style_workflow"]["adaptation_notes"]
@@ -148,15 +155,18 @@ def test_retry_keeps_failed_job_and_uses_saved_original(tmp_path, monkeypatch, s
     update_job(conn, "failed", status="error", step="error", original_file="original.jpg",
                error="Lightroom plugin not connected")
     calls = []
+    completed = Event()
     def process(job_id, source):
         calls.append((job_id, source.read_bytes()))
-        update_job(conn, job_id, status="ready", step="ready")
+        update_job(appmod._c(), job_id, status="ready", step="ready")
+        completed.set()
     monkeypatch.setattr(appmod, "_safe_run", process)
     with TestClient(appmod.app) as client:
         response = client.post("/api/jobs/failed/retry")
         assert response.status_code == 200
         new_id = response.json()["id"]
         assert new_id != "failed"
+        assert completed.wait(5)
         assert calls == [(new_id, scene.read_bytes())]
         assert get_job(conn, new_id)["original_name"] == "test-photo.jpg"
         assert get_job(conn, "failed")["error"] == "Lightroom plugin not connected"

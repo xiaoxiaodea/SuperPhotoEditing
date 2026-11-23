@@ -36,6 +36,7 @@ def test_status_reports_an_executable_cli_without_opening_an_app(tmp_path, monke
     cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     cli.chmod(0o755)
     monkeypatch.setattr(lr, "_client", None)
+    monkeypatch.setattr("superphoto.lightcraft._version", lambda path: "lightcraft-cli 0.21.1")
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     monkeypatch.delenv("SUPERPHOTO_LIGHTCRAFT_BIN", raising=False)
     monkeypatch.delenv("SUPERPHOTO_ROOT", raising=False)

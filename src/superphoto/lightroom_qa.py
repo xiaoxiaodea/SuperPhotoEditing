@@ -54,6 +54,8 @@ class LightroomQualityReport:
     baseline: LightroomPixelMetrics
     issues: list[LightroomQualityIssue] = field(default_factory=list)
     region_source: str = "color-heuristic"
+    exposure_assessment: dict[str, float] = field(default_factory=dict)
+    neutral_assessment: dict[str, float | str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -98,6 +100,10 @@ def assess_lightroom_render(
     region_masks: dict[str, np.ndarray] | None = None,
     creative_palette: bool = False,
     previous_accepted_path: Path | None = None,
+    exposure_recovery: bool = False,
+    exposure_lift_ev: float = 0.0,
+    natural_color: bool = False,
+    render_recipe: Recipe | None = None,
 ) -> LightroomQualityReport:
     """Compare an actual Lightroom export against its Lightroom baseline.
 
@@ -249,6 +255,57 @@ def assess_lightroom_render(
             )
         )
 
+    exposure_assessment = {}
+    if exposure_recovery:
+        # Fixed baseline coordinates: moving clipping below the threshold must
+        # never masquerade as recovery of detail that was absent in a JPEG.
+        usable = (baseline.luma > .03) & (baseline.luma < .85) & (np.max(baseline.rgb, axis=-1) < .99)
+        white = np.min(baseline.rgb, axis=-1) > .99
+        exposure_assessment = {"usable_fraction": float(np.mean(usable)), "original_white_fraction": float(np.mean(white))}
+        if np.mean(usable) > .35:
+            before_mid = float(np.median(baseline.luma[usable]))
+            after_mid = float(np.median(rendered.luma[usable]))
+            exposure_assessment.update(usable_median_before=before_mid, usable_median_after=after_mid)
+            if before_mid > .30 and after_mid > before_mid * .87:
+                issues.append(LightroomQualityIssue("exposure_unresolved", 1.0,
+                    "有效区域的过亮中间调未得到校正；不能仅凭减少高光裁切判定恢复成功"))
+        if np.any(white):
+            exposure_assessment["original_white_median_after"] = float(np.median(rendered.luma[white]))
+        if np.mean(white) >= .03 and float(np.median(rendered.luma[white])) < .85:
+            issues.append(LightroomQualityIssue("clipped_whites_greyed", 1.0,
+                "原片无纹理的纯白区域被压灰；降低亮度没有恢复原本不存在的细节"))
+
+    if exposure_lift_ev > .15:
+        # A damage-free export can still leave the diagnosed dark midtones
+        # untouched. Check the same original coordinates, independently of look
+        # distance or parameter values. Never equate this with aesthetic quality.
+        if render_recipe is not None and _changes_framing(render_recipe):
+            exposure_assessment["lift_skipped"] = "geometry_changes"
+        else:
+            midtones = (baseline.luma > .04) & (baseline.luma < .40)
+            exposure_assessment["lift_region_fraction"] = float(np.mean(midtones))
+            if np.mean(midtones) >= .15:
+                before_mid = float(np.median(baseline.luma[midtones]))
+                after_mid = float(np.median(rendered.luma[midtones]))
+                ratio = after_mid / max(before_mid, 1e-6)
+                minimum = float(2 ** (min(exposure_lift_ev, .55) * .5))
+                exposure_assessment.update(lift_median_before=before_mid,
+                    lift_median_after=after_mid, lift_ratio=ratio, lift_min_ratio=minimum)
+                if ratio < minimum:
+                    issues.append(LightroomQualityIssue("exposure_lift_unresolved", 1.0,
+                        f"已诊断偏暗的中间调亮度只达到基线 {ratio:.0%}，未达本次最低改善目标 {minimum:.0%}；不能以无损伤代替完成校正"))
+
+    neutral_assessment = {}
+    if natural_color and render_recipe is not None and _changes_framing(render_recipe):
+        neutral_assessment = {"skipped": "geometry_changes"}
+    elif natural_color:
+        neutral_assessment = neutral_cast(baseline.rgb, rendered.rgb)
+        shift = neutral_assessment.get("median_shift", 0.0)
+        if shift > NEUTRAL_SHIFT and neutral_assessment["introduced_chroma"] > NEUTRAL_INTRODUCED:
+            issues.append(LightroomQualityIssue("neutral_color_cast", _severity(shift, NEUTRAL_SHIFT, 5),
+                f"原片近中性亮部占 {neutral_assessment['fraction']:.1%}，新增色度偏移 {shift:.1f}；"
+                "与保留自然颜色的目标不符，需减弱调色而非补偿曝光"))
+
     # A should be restrained. B/C may move farther, but extreme display-referred
     # changes usually indicate that contrast and colour moves compounded.
     distance_limit = 17.0 if slot == "A" else 29.0
@@ -272,6 +329,8 @@ def assess_lightroom_render(
         baseline=base_metrics,
         issues=issues,
         region_source="semantic-regions+color" if trusted else "color-heuristic",
+        exposure_assessment=exposure_assessment,
+        neutral_assessment=neutral_assessment,
     )
 
 
@@ -352,6 +411,9 @@ def correction_for_report(report: LightroomQualityReport, *, strength: float = 1
         elif issue.code == "sky_oversaturation":
             hue("blue", sat=-0.11 * scale, lum=0.025 * scale)
             hue("aqua", sat=-0.08 * scale)
+        elif issue.code == "exposure_lift_unresolved":
+            recipe.exposure_ev += 0.12 * scale
+            recipe.shadows += 0.04 * scale
         elif issue.code == "too_dark":
             recipe.exposure_ev += 0.10 * scale
             recipe.shadows += 0.06 * scale
@@ -367,8 +429,18 @@ def correction_for_report(report: LightroomQualityReport, *, strength: float = 1
     return recipe.clamped()
 
 
+def _midtone_support(points: list[tuple[float, float]], width: float) -> list[tuple[float, float]]:
+    """Give sparse curves a midpoint to move, within the native point budget."""
+    px, py = np.array(points, dtype=float).T
+    xs = np.unique(np.r_[px, .5 - width, .5, .5 + width])
+    if len(xs) > 32:
+        return points  # Dense curves already occupy the renderer's point budget.
+    return list(zip(xs.tolist(), np.interp(xs, px, py).tolist()))
+
+
 def separate_candidate_recipe(recipe: Recipe, *, slot: str, attempt: int, exposure_locked: bool = False,
-                              method: str | None = None, technical: TechnicalReport | None = None) -> Recipe:
+                              method: str | None = None, technical: TechnicalReport | None = None,
+                              primary: Recipe | None = None) -> Recipe:
     """Develop a safe candidate's own light design; never borrow another's curve.
 
     Work from the effective recipe after stage rollbacks. Keep black/white
@@ -386,7 +458,15 @@ def separate_candidate_recipe(recipe: Recipe, *, slot: str, attempt: int, exposu
         if method.startswith("preset:"):
             midpoint = float(np.interp(.5, *np.array(points).T))
             direction = 1 if midpoint >= .5 or technical.mean_luma < .12 else -1
-        shaped = [(x, float(np.clip(y + direction * .012 * step * max(0, 1-abs(x-.5)/.3), 0, 1)))
+        recovery = primary is not None and not primary.curve.is_identity()
+        if recovery:
+            # A corrected photo has a midpoint below identity by design. Measure
+            # this look's density relative to its corrected base, not to .5.
+            base_mid = float(np.interp(.5, *np.array(primary.curve.rgb).T))
+            direction = 1 if float(np.interp(.5, *np.array(points).T)) >= base_mid else -1
+        amplitude = .025 if recovery else .012
+        points = _midtone_support(points, .3)
+        shaped = [(x, float(np.clip(y + direction * amplitude * step * max(0, 1-abs(x-.5)/.3), 0, 1)))
                   for x, y in points]
         ys = np.maximum.accumulate([y for _, y in shaped])
         result.curve.rgb = [(x, float(y)) for (x, _), y in zip(shaped, ys)]
@@ -394,6 +474,7 @@ def separate_candidate_recipe(recipe: Recipe, *, slot: str, attempt: int, exposu
     direction = -1 if slot == "B" else 1
     exposure = 0.0 if exposure_locked else direction * .08 * step
     points = recipe.curve.rgb or [(0, 0), (.18, .18), (.5, .5), (.78, .78), (1, 1)]
+    points = _midtone_support(points, .35)
     shaped = []
     for x, y in points:
         midtone = max(0.0, 1.0 - abs(x - .5) / .35)
@@ -479,6 +560,73 @@ def blend_recipes(safe: Recipe, styled: Recipe, style_weight: float = 0.22) -> R
     return Recipe.model_validate(data).clamped()
 
 
+def _changes_framing(recipe: Recipe) -> bool:
+    """Fixed-pixel neutral comparisons require matching crop and perspective."""
+    crop_defaults = {"top": 0, "left": 0, "bottom": 1, "right": 1, "angle": 0}
+    optics_defaults = {"manual_distortion": 0, "perspective_vertical": 0,
+                       "perspective_horizontal": 0, "perspective_rotate": 0,
+                       "perspective_scale": 100, "perspective_aspect": 0, "perspective_upright": 0}
+    return any(value is not None and abs(value-default) > 1e-6
+               for controls, defaults in ((recipe.crop, crop_defaults), (recipe.optics, optics_defaults))
+               for key, default in defaults.items() for value in [getattr(controls, key)])
+
+
+def needs_color_repair(report: LightroomQualityReport) -> bool:
+    """Use color-only repair once other technical damage has been resolved."""
+    return (any(issue.code == "neutral_color_cast" for issue in report.issues)
+            and not any(issue.hard and not issue.advisory and issue.code != "neutral_color_cast"
+                        for issue in report.issues))
+
+
+def reduce_color_cast(recipe: Recipe, primary: Recipe, amount: float = .5) -> Recipe:
+    """Reduce chromatic styling while retaining this candidate's light design.
+
+    Channel curves move toward their shared density, preserving the base
+    correction's channel differences. This is a fresh-source absolute recipe.
+    """
+    if recipe == primary:
+        return recipe.model_copy(deep=True)
+    amount = float(np.clip(amount, 0, .70))
+    result = recipe.model_copy(deep=True)
+    colors = blend_recipes(primary, recipe, style_weight=amount)
+    for key in ("temperature", "tint", "saturation", "vibrance"):
+        setattr(result, key, getattr(colors, key))
+    for name, shift in result.hsl.items():
+        mixed = colors.hsl[name]
+        shift.hue, shift.sat = mixed.hue, mixed.sat
+    for band in ("shadows", "midtones", "highlights"):
+        a, b = getattr(primary.grade, band), getattr(recipe.grade, band)
+        setattr(result.grade, band, tuple(x + amount * (y-x) for x, y in zip(a, b)))
+    for band in ("shadow", "midtone", "highlight"):
+        for field_name in ("hue", "sat"):
+            key = band + "_" + field_name
+            setattr(result.color_grading, key, getattr(colors.color_grading, key))
+    base_masks = {mask.target: mask for mask in primary.masks}
+    for mask in result.masks:
+        base = base_masks.get(mask.target)
+        for key in ("temperature", "tint", "saturation"):
+            a = getattr(base, key) if base is not None else 0
+            setattr(mask, key, a + amount * (getattr(mask, key)-a))
+
+    if any(getattr(recipe.curve, c) or getattr(primary.curve, c) for c in "rgb"):
+        points = lambda curve, c: np.array(getattr(curve, c) or [(0, 0), (1, 1)], dtype=float).T
+        knots = np.unique(np.r_[0., 1., *[points(curve, c)[0] for curve in (recipe.curve, primary.curve) for c in "rgb"]])
+        if len(knots) > 32:
+            knots = np.linspace(0, 1, 32)
+        full = np.array([np.interp(knots, *points(recipe.curve, c)) for c in "rgb"])
+        base = np.array([np.interp(knots, *points(primary.curve, c)) for c in "rgb"])
+        weights = np.array([.2126, .7152, .0722])
+        common, base_common = weights @ full, weights @ base
+        for i, channel in enumerate("rgb"):
+            target = common + base[i] - base_common
+            values = np.clip(target + amount * (full[i]-target), 0, 1)
+            # Each curve is a convex blend of monotone channel functions when
+            # the base is neutral. Keep imported unusual bases monotone too.
+            values = np.maximum.accumulate(values)
+            setattr(result.curve, channel, list(zip(knots.tolist(), values.tolist())))
+    return result.clamped()
+
+
 def _read_pixels(path: Path, *, max_edge: int = 960, size: tuple[int, int] | None = None) -> _PixelSample:
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -556,6 +704,38 @@ def _perceptual_distance(a: np.ndarray, b: np.ndarray) -> float:
     lab_a = _rgb_to_lab(a)
     lab_b = _rgb_to_lab(b)
     return float(np.mean(np.linalg.norm(lab_a - lab_b, axis=-1)))
+
+
+# A natural-colour version fails when the near-neutrals of the original move this far (median a*b*)
+# and this much of that is new colour rather than less of the colour they had.
+NEUTRAL_SHIFT, NEUTRAL_INTRODUCED = 3.0, 2.5
+
+
+def neutral_cast(before_rgb: np.ndarray, after_rgb: np.ndarray) -> dict[str, float]:
+    """How far the near-neutral light pixels of ``before_rgb`` moved in colour in ``after_rgb``.
+
+    Both are sRGB 0..1 arrays of one size. Fixed source coordinates identify measured near-neutrals,
+    not snow, clothing or any other material. Existing colored light is not a target.
+    """
+    before_lab, after_lab = _rgb_to_lab(before_rgb), _rgb_to_lab(after_rgb)
+    neutral = ((before_lab[..., 0] > 55) & (before_lab[..., 0] < 98)
+               & (np.linalg.norm(before_lab[..., 1:], axis=-1) < 6))
+    fraction = float(np.mean(neutral))
+    out: dict[str, float] = {"fraction": fraction}
+    if fraction < .005:
+        return out
+    before_ab, after_ab = before_lab[..., 1:][neutral], after_lab[..., 1:][neutral]
+    delta = after_ab - before_ab
+    # Distance from the original color-to-neutral segment allows pure
+    # desaturation, but catches a blue-to-green swap at equal chroma.
+    projection = np.clip(np.sum(after_ab * before_ab, axis=-1)
+                         / np.maximum(np.sum(before_ab ** 2, axis=-1), 1e-6), 0, 1)
+    out.update(median_shift=float(np.linalg.norm(np.median(delta, axis=0))),
+               chroma_before=float(np.median(np.linalg.norm(before_ab, axis=-1))),
+               chroma_after=float(np.median(np.linalg.norm(after_ab, axis=-1))),
+               introduced_chroma=float(np.median(np.linalg.norm(after_ab - before_ab * projection[:, None], axis=-1))),
+               delta_a=float(np.median(delta[:, 0])), delta_b=float(np.median(delta[:, 1])))
+    return out
 
 
 def _rgb_to_lab(rgb: np.ndarray) -> np.ndarray:

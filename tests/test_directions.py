@@ -107,7 +107,7 @@ def test_structured_planner_accepts_three_complete_scene_specific_recipes(tmp_pa
     critique, technical = Critique(), _tech()
     expected = scene_directions(critique, technical)
     monkeypatch.setattr("superphoto.directions.probe", lambda _: {"ready": True, "resolved_model": "vision"})
-    def vision(*args, response_schema):
+    def vision(*args, response_schema, **kwargs):
         assert response_schema["required"] == ["A", "B", "C"]
         assert response_schema["$defs"]["direction"]["required"] == ["title", "goal", "moves", "recipe"]
         return json.dumps({d.slot: d.model_dump(exclude={"slot", "source"}) for d in expected})
@@ -116,7 +116,7 @@ def test_structured_planner_accepts_three_complete_scene_specific_recipes(tmp_pa
     actual = design_directions(Settings(), image, critique, technical, audit_path=audit)
     assert all(d.source == "ollama" for d in actual)
     assert [d.recipe for d in actual] == [d.recipe for d in expected]
-    assert json.loads(audit.read_text())["issues"] == []
+    assert json.loads(audit.read_text(encoding="utf-8"))["issues"] == []
 
 
 def test_planner_prompt_grounds_color_and_local_moves_and_accepts_shared_natural_palette(tmp_path, monkeypatch):
@@ -136,7 +136,7 @@ def test_planner_prompt_grounds_color_and_local_moves_and_accepts_shared_natural
                 for slot, curve in zip("ABC", curves)}
     prompts = []
 
-    def vision(settings, model, prompt, image, *, response_schema):
+    def vision(settings, model, prompt, image, *, response_schema, **kwargs):
         prompts.append(prompt)
         return json.dumps(response)
 
@@ -202,7 +202,7 @@ def test_planner_gets_study_sources_and_can_preserve_selective_color_changes(tmp
     expected[2].recipe.curve = ToneCurve(rgb=[(0, 0), (.2, .17), (.5, .42), (.8, .78), (1, 1)])
     next(m for m in expected[1].recipe.masks if m.target == "subject").exposure_ev = .05
     monkeypatch.setattr("superphoto.directions.probe", lambda _: {"ready": True, "resolved_model": "vision"})
-    def vision(settings, model, prompt, image, *, response_schema):
+    def vision(settings, model, prompt, image, *, response_schema, **kwargs):
         assert "名人仿色调色.md" in prompt and "Hasselblad-REPORT.md" in prompt and "调色素材" in prompt
         assert "hsl" in response_schema["$defs"]["direction"]["properties"]["recipe"]["properties"]
         response = {d.slot: d.model_dump(exclude={"slot", "source"}) for d in expected}
