@@ -44,7 +44,7 @@ def scene_similarity(a: dict, b: dict) -> float:
 def variant_method(variant: dict) -> str:
     recipe = json.loads(variant["recipe_json"])
     method = recipe.get("style_workflow", {}).get("method_id", "")
-    if method in METHODS:
+    if method in METHODS or method.startswith("direction:"):    # direction: a directed version (experience.py)
         return method
     from .recipes import LOOKS
     if method.startswith("preset:") and method.removeprefix("preset:") in LOOKS:
@@ -142,8 +142,9 @@ def preset_feedback(conn: sqlite3.Connection, critique: Critique, technical: Tec
 
 def taste_summary(conn: sqlite3.Connection) -> str:
     samples = preference_samples(conn)
-    likes = sum(s["verdict"] > 0 for s in samples)
-    dislikes = sum(s["verdict"] < 0 for s in samples)
     if not samples:
-        return "逐张标记满意或不满意，系统会记住你在类似画面下的偏好。"
-    return f"已记下 {likes} 张满意、{dislikes} 张不满意；推荐会参考相似画面的反馈。"
+        return "给每个版本选 pass、留下或最爱，系统会记住你在类似画面下喜欢的方向。"
+    favourites = sum(s["verdict"] == 2 for s in samples)
+    keeps = sum(s["verdict"] == 1 for s in samples)
+    passes = sum(s["verdict"] < 0 for s in samples)
+    return f"已记下 {favourites} 个最爱、{keeps} 个留下、{passes} 个 pass；相似画面会参考这些选择来定方向。"

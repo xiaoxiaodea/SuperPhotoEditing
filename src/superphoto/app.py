@@ -30,6 +30,8 @@ from .db import (
     insert_feedback,
     insert_job,
     look_stats,
+    SLOT_LETTERS,
+    VERDICTS,
     get_ratings,
     set_rating,
     get_refinement,
@@ -39,7 +41,8 @@ from .db import (
 from .darktable_export import darktable_cli_path
 from .ingest import ALLOWED_EXTS, source_kind
 from .lightroom import LightroomError, connect_lightroom, install_lightroom_plugin, lightroom_status
-from .models import FeedbackIn, RatingIn, RefinementIn
+from . import full_export
+from .models import FeedbackIn, FullExportIn, RatingIn, RefinementIn
 from .vision import get_vision_status
 from .vault_routes import build_router as build_vault_router, publish_bridge, retract_bridge
 from .pipeline import run_job
@@ -47,6 +50,7 @@ from .preference import describe_taste
 from .recipes import LOOKS
 from .semantic import semantic_status
 from .store import job_dir
+from .experience import variant_profile
 from .scene_preferences import job_profile, preference_samples, variant_method
 from .refinement import refinement_base, run_refinement
 
@@ -298,8 +302,9 @@ def preferences() -> dict[str, Any]:
         titled.append({**row, "title": look.title if look else row["look_id"]})
     samples = preference_samples(_c())
     return {"total_picks": stats["total_picks"], "looks": titled, "summary": describe_taste(_c()),
-            "ratings": {"like": sum(s["verdict"] > 0 for s in samples),
-                        "dislike": sum(s["verdict"] < 0 for s in samples)}}
+            "ratings": {"keep": sum(s["verdict"] == 1 for s in samples),
+                        "favorite": sum(s["verdict"] == 2 for s in samples),
+                        "pass": sum(s["verdict"] < 0 for s in samples)}}
 
 
 @app.post("/api/jobs")
@@ -432,9 +437,10 @@ def _ready_variant(conn, job_id: str, slot: str) -> tuple[dict, dict]:
 def rate_variant(job_id: str, slot: str, body: RatingIn) -> dict:
     conn = _c()
     job, variant = _ready_variant(conn, job_id, slot)
-    method, scene = variant_method(variant), job_profile(job)
+    method, scene = variant_method(variant), variant_profile(variant) or job_profile(job)
     with _lock:
-        set_rating(conn, job_id, slot, {"like": 1, "dislike": -1, None: 0}[body.verdict], method, scene)
+        verdict = {**VERDICTS, "like": VERDICTS["keep"], "dislike": VERDICTS["pass"], None: 0}[body.verdict]
+        set_rating(conn, job_id, slot, verdict, method, scene)
     return {"ok": True, "ratings": get_ratings(conn, job_id), "summary": describe_taste(conn),
             "learnable": bool(method and scene)}
 
@@ -508,6 +514,37 @@ def refinement_image(job_id: str, refinement_id: str) -> FileResponse:
     return FileResponse(image, media_type="image/jpeg", filename=f"SuperPhoto-{record['slot']}-微调-{refinement_id[:8]}.jpg")
 
 
+@app.post("/api/jobs/{job_id}/full")
+def prepare_full_size(job_id: str, body: FullExportIn) -> dict[str, Any]:
+    """Render the version shown at full size (JPEG or 16-bit TIFF); the file is then fetched from ``url``."""
+    settings, conn = _boot()
+    _ready_variant(conn, job_id, body.slot)
+    version = str(body.version) if body.version else None
+    try:
+        client, _status = connect_lightroom(settings.lightcraft_bin)
+        result = full_export.export_full(settings, conn, job_id, body.slot, version, body.format,
+                                         binary=Path(client.binary))
+    except full_export.FullExportUnavailable as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except LightroomError as exc:
+        raise HTTPException(503, f"原尺寸导出失败：{exc}") from exc
+    return {"url": f"/api/jobs/{job_id}/full/{result['name']}",
+            "filename": full_export.download_name(body.slot, version, body.format),
+            **{key: result.get(key) for key in ("format", "width", "height", "bytes", "seconds", "cached")}}
+
+
+@app.get("/api/jobs/{job_id}/full/{name}")
+def full_size_file(job_id: str, name: str) -> FileResponse:
+    parsed = full_export.parse_name(name)
+    path = full_export.file_path(_s().jobs_dir / job_id, name) if get_job(_c(), job_id) else None
+    if parsed is None or path is None or not path.is_file():
+        raise HTTPException(404, "原尺寸文件还没有导出")
+    target, fmt = parsed
+    slot, _, version = target.partition("-")
+    return FileResponse(path, media_type=full_export.FORMATS[fmt]["media_type"],
+                        filename=full_export.download_name(slot, version or None, fmt))
+
+
 @app.post("/api/jobs/{job_id}/feedback")
 def submit_feedback(job_id: str, body: FeedbackIn) -> dict[str, Any]:
     conn = _c()
@@ -553,7 +590,7 @@ def submit_feedback(job_id: str, body: FeedbackIn) -> dict[str, Any]:
             "notes": note,
         },
     )
-    method, scene = variant_method(chosen), job_profile(job)
+    method, scene = variant_method(chosen), variant_profile(chosen) or job_profile(job)
     if method and scene:
         verdict = 1 if (body.style_score or inferred[1]) >= 4 and (body.technical_score or inferred[0]) >= 3 else -1
         with _lock:
@@ -567,13 +604,7 @@ def media(job_id: str, filename: str) -> FileResponse:
     folder = settings.jobs_dir / job_id
     if not folder.exists():
         raise HTTPException(404, "not found")
-    allowed = {
-        "source_preview.jpg",
-        "critique_preview.jpg",
-        "variant_A.jpg",
-        "variant_B.jpg",
-        "variant_C.jpg",
-    }
+    allowed = {"source_preview.jpg", "critique_preview.jpg", *(f"variant_{slot}.jpg" for slot in SLOT_LETTERS)}
     if filename not in allowed:
         raise HTTPException(404, "not found")
     path = folder / filename

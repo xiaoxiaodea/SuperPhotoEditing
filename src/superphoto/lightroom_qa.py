@@ -157,7 +157,7 @@ def assess_lightroom_render(
     # Deliberate B/C grading can color previously neutral water or walls while
     # keeping almost all pixels moderately saturated. Distinguish this from
     # excessive high-saturation coverage; retain stricter A and skin checks.
-    styled = creative_palette and slot in {"B", "C"}
+    styled = creative_palette and slot != "A"     # A is the natural finish; the directed path has up to nine slots.
     saturation_limit = max(base_metrics.saturation_mean + (0.14 if styled else 0.075),
                            base_metrics.saturation_mean * (1.50 if styled else 1.20))
     high_sat_limit = max(base_metrics.high_saturation + 0.105, base_metrics.high_saturation * 1.38)

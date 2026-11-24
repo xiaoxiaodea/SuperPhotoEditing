@@ -31,6 +31,7 @@ import base64
 import copy
 import json
 import math
+import re
 import shutil
 import sqlite3
 import time
@@ -39,53 +40,30 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from . import tone
 from .config import Settings
+from . import experience
+from .db import SLOT_LETTERS
+from .experience import DRAMATIC_ROLE, NATURAL_ROLE, PALETTE_ROLE
 from .lightcraft import RELATIVE_WB_MODE
 from .looks import LOOKS, look_lines
 from .vision import VisionUnavailable, chat_vision, is_temporary, probe, provider_from, safe_error
 
 ENGINE = "lightcraft-directed"
+# SUPERPHOTO_DIRECTED_VERSIONS=3 keeps the classic trio below (natural, dramatic, palette: the benchmark's set and
+# prompt). With more, A stays the natural finish and the planner chooses each other version's direction from the
+# library in experience.py, with what this user kept on similar pictures in view.
 SLOTS = ("A", "B", "C")
+ALL_SLOTS = tuple(SLOT_LETTERS)
+TRIO = {"A": "natural", "B": "dramatic", "C": "palette"}
 DEFAULT_TITLES = {"A": "自然完成", "B": "更有力度", "C": "风格化"}
-ROLES = {
-    "A": "Natural finish: faithful colour, the tonal range this scene deserves and a clear light hierarchy. The"
-         " standard edit a careful professional would deliver; clearly better than the baseline.",
-    "B": "Dramatic light: a visibly different TONAL structure from A. Deeper shadows and denser sky or"
-         " surroundings, a brighter and more separated subject, stronger local dodge and burn. Its tone targets"
-         " differ from A's. Not merely more saturation. The deeper shadows are the surroundings, never the subject:"
-         " when the subject or a face sits in the darkest 10-20% (see the cell table), darken around it with masks"
-         " and keep black and shadows near image 1. In a night or low-key frame whose darks are already near"
-         " black there are no deeper shadows to find: B keeps the frame near image 1's darkness (median within"
-         " about +0.5 EV of image 1, clearly below A's) and lifts only the subject's own lit surface, under a"
-         " luminance-limited mask, so it reads as an island of light in the dark, not as a lifted frame. The"
-         " ground, path, pavement and walls stay at image 1's brightness or darker (burn them a little with"
-         " masks); do not lift a pool on the ground: lifting the lit ground is what A does, and a B that lifts it"
-         " too looks like A on a board however much darker its mid is (a pool, if any, is small and right under"
-         " the lamp). The frame highlights (p90) there are that lit ground: keep them near image 1 and at least"
-         " 0.7 EV below A's. A natural A lifts a night less than a stop, so a B left near image 1 is still close"
-         " to A: the subject's lit surface has to end clearly brighter than A leaves it (about +1 EV over image"
-         " 1), with its box on the side the lamp actually hits, not its shaded side."
-         " In a bright scene (sunlit sand, snow, salt, white walls) the sunlit surface stays luminous in B too"
-         " (frame mid within about -0.3 EV of image 1): the depth comes from what is already in shade or"
-         " colour (cliffs, shadow sides, sky), burned with masks, not from pulling the whole frame down. A"
-         " subject darker than its bright surroundings (camels or people on sand, a figure against snow or sky)"
-         " separates by staying darker against that luminous ground, with clarity or contrast on it; do not"
-         " lift it towards the ground's brightness, which on a uniform surface makes a visible pool of light.",
-    "C": "Colour style: A's light design carried into a distinct, tasteful PALETTE, normally built on one of the"
-         " reference looks. Skin and white objects stay believable. Next to A it must read as another palette at"
-         " a glance: change the colour of the LARGE areas (sky, water, ground, the overall white balance, the"
-         " colour of the mid-tones), not only a split-tone in the darks or a small shift of one hue, which on a"
-         " board looks like A again. With A's tone targets that takes the look at 0.8-1.0, or white balance,"
-         " calibration, grading and colour targets on the large areas that visibly recolour them (mixer hue"
-         " cannot: see mixer); a matte look also needs its lifted black and softened highlights written into the"
-         " tone targets, or it reads as A slightly brighter.",
-}
+# The role texts live in the direction library (experience.py); A/B/C are its natural, dramatic and palette entries.
+ROLES = {"A": NATURAL_ROLE, "B": DRAMATIC_ROLE, "C": PALETTE_ROLE}
 
 # Safety ranges in LightCraft units (exposure in EV, everything else on the
 # -100..100 slider scale). The visual review and the damage gate decide, not a
@@ -154,7 +132,7 @@ LOOK_PROBE_STRENGTH = 1.0
 LOOK_PROBE_WORKERS = 4
 # The darkest vignette a planned version gets (a user's refinement is not held). In p4-r1 every round with
 # -15 or more lost points for it: uneven light on uniform sand, dead corners on a dark lower half.
-VIGNETTE_FLOOR = {"A": -10.0, "B": -14.0, "C": -14.0}
+VIGNETTE_FLOOR = {slot: -10.0 if slot == "A" else -14.0 for slot in SLOT_LETTERS}
 # Global controls that are left out of a plan with at least TONE_OWNS_FROM percentile targets: the
 # solver places those tones with exposure and the master curve, and a second set of tone controls
 # under it only has to be undone by a steeper curve.
@@ -1463,7 +1441,7 @@ def measure_looks(binary: Path, original: Path, folder: Path, source_kind: str) 
     Rendered on a copy of the photo in ``folder``; a look whose render fails is left out, and an empty dict
     means no numbers (planning goes on without them).
     """
-    from .lightcraft import LightCraftError, render_document
+    from .lightcraft import LightCraftError, render_document, render_session
     from .lightroom_qa import render_distance
 
     folder.mkdir(parents=True, exist_ok=True)
@@ -1479,7 +1457,8 @@ def measure_looks(binary: Path, original: Path, folder: Path, source_kind: str) 
 
     jobs = [("unedited", {})] + [(look_id, {"look": {"id": look_id, "strength": LOOK_PROBE_STRENGTH}})
                                  for look_id in LOOKS]
-    with ThreadPoolExecutor(max_workers=LOOK_PROBE_WORKERS) as pool:
+    # One session renders them in turn (the pool's threads queue on it); without one, they render cold in parallel.
+    with render_session(binary, source), ThreadPoolExecutor(max_workers=LOOK_PROBE_WORKERS) as pool:
         renders = dict(pool.map(lambda item: one(*item), jobs))
     plain = renders.pop("unedited")
     try:
@@ -1874,8 +1853,63 @@ def _stats_block(stats: dict[str, Any] | None) -> str:
 """
 
 
+# At most this many chosen versions are built on reference looks, so six versions are not six palettes of one picture.
+MAX_LOOK_VERSIONS = 2
+# Directions the planner proposed on earlier photos that are offered again, the best-rated first.
+MAX_LEARNED_OFFERED = 8
+# The looks block speaks of the trio's C; with chosen directions it speaks of any colour version.
+_LOOKS_FOR_CHOSEN = {
+    "Version C should normally use one": "Every colour direction (palette, look:<id>) uses one",
+    "A and B normally use no look": "A and the light directions normally use no look",
+    "write C's chroma": "write a colour version's chroma",
+    "C's tone usually sits near A's": "A colour version's tone usually sits near A's",
+    "make C visibly different from A: then give C its own": "make it visibly different from A: then give it its own",
+}
+
+
+def _library_text(library: dict[str, experience.Direction], weights: dict[str, float] | None = None) -> str:
+    weights = weights or {}
+    learned = sorted((d for d in library.values() if d.origin == "planner"), key=lambda d: -weights.get(d.id, 1.0))
+    lines = [f"- {d.id} ({d.title}): {d.role}" for d in library.values() if d.origin == "builtin" and not d.natural]
+    lines.append("- look:<id> (one for each look in LOOKS below; its title is there): a colour direction built on that"
+                 " look, following the palette role above")
+    lines += [f"- {d.id} ({d.title}, proposed for an earlier photo): {d.role}"
+              + (f" Built on look {d.look}." if d.look else "") for d in learned[:MAX_LEARNED_OFFERED]]
+    return "\n".join(lines)
+
+
+def _design_text(slots: list[str], library: dict[str, experience.Direction], experience_text: str,
+                 weights: dict[str, float] | None, elements: dict[str, Any] | None) -> str:
+    others = ", ".join(slots[1:])
+    seen = ""
+    if elements and (elements.get("elements") or elements.get("light_kind")):
+        seen = (f"   A first look at the picture found: {', '.join(elements.get('elements') or []) or 'no listed element'};"
+                f" light {elements.get('light_kind') or 'unclear'}.\n")
+    return (f"4. Design {len(slots)} finished versions, {', '.join(slots)}. The user keeps the ones that suit their"
+            " taste and passes the rest, so each is a different photograph a professional could deliver, not a"
+            " strength of another one.\n"
+            f"   A is always: {NATURAL_ROLE}\n"
+            f"   For each of {others} choose a direction from the library below, for a reason you can see in this"
+            " picture (its elements, light and mood). A direction that does not suit this picture is not chosen"
+            " (dramatic light on a flat frame with nothing to sculpt, a snow palette on a desert). Use each direction"
+            f" once, build at most {MAX_LOOK_VERSIONS} versions on looks (look:<id>), and mix light directions with"
+            " colour directions. When this picture clearly calls for something no direction gives, propose a new"
+            " one instead: \"id\": \"new\" with a short Chinese \"title\", a \"role\" written like the roles below"
+            " and \"look\" (a look id or null). Write each version's plan to its direction's role, and keep each plan"
+            " compact (intent and mask purposes in a short sentence) so all of them fit in one answer.\n"
+            f"{seen}"
+            "   DIRECTION LIBRARY:\n" + _library_text(library, weights) + "\n"
+            + (experience_text or "LOCAL EXPERIENCE: nothing has been rated yet on pictures like this one; choose from"
+               " the picture alone."))
+
+
 def plan_prompt(technical: Any, size: tuple[int, int], stats: dict[str, Any] | None = None,
-                looks: dict[str, dict[str, float]] | None = None, min_distance: float = 5.0) -> str:
+                looks: dict[str, dict[str, float]] | None = None, min_distance: float = 5.0, *,
+                slots: list[str] | None = None, library: dict[str, experience.Direction] | None = None,
+                experience_text: str = "", weights: dict[str, float] | None = None,
+                elements: dict[str, Any] | None = None) -> str:
+    """The planning prompt. Without ``library`` it asks for the classic trio A/B/C; with it, for ``slots`` versions
+    whose directions (after the natural A) the planner chooses, given ``experience_text`` (experience_block)."""
     measurements = _measurements(technical)
     source_kind = str(measurements.get("source_kind") or "jpeg")
     width, height = size
@@ -1893,6 +1927,22 @@ def plan_prompt(technical: Any, size: tuple[int, int], stats: dict[str, Any] | N
                   " light, see above)" if raw else
                   "densify the sky, lift the subject or face, burn a bright distracting edge, separate distant layers,"
                   " protect a light source")
+    looks_text = _looks_block(looks, _frame_chroma(stats) if stats else None, min_distance, source_kind)
+    if library is None:
+        design = f"""4. Design three finished versions:
+   A: {ROLES['A']}
+   B: {ROLES['B']}
+   C: {ROLES['C']}"""
+        directions_shape = ""
+        plans_shape = f'"A": {_PLAN_SHAPE}, "B": {{...}}, "C": {{...}}'
+    else:
+        slots = list(slots or ALL_SLOTS[:6])
+        design = _design_text(slots, library, experience_text, weights, elements)
+        for old, new in _LOOKS_FOR_CHOSEN.items():
+            looks_text = looks_text.replace(old, new)
+        chosen = ", ".join(f'"{slot}": {{"id": "...", "why": "..."}}' for slot in slots[1:3])
+        directions_shape = f'\n "directions": {{{chosen}, ...}},'
+        plans_shape = f'"A": {_PLAN_SHAPE}, ' + ", ".join(f'"{slot}": {{...}}' for slot in slots[1:])
     return f"""You are a senior photo retoucher directing LightCraft, a Lightroom-like raw developer.
 Image 1 is the neutral LightCraft render of the photograph (no edits). Image 2 is the same picture with a
 coordinate grid: x runs 0 (left) to 1 (right), y runs 0 (top) to 1 (bottom); lines every 0.1.
@@ -1905,16 +1955,13 @@ File measurements (not artistic targets): {json.dumps(measurements, ensure_ascii
 2. Decide where the tones of the finished picture should sit and write that as tone targets.
 3. Design the local work a retoucher would do by hand: {local_work}. Use 2-4 masks per version (5 at
    most), each with a name and a purpose, built so that their edges cannot be seen.
-4. Design three finished versions:
-   A: {ROLES['A']}
-   B: {ROLES['B']}
-   C: {ROLES['C']}
+{design}
 
 {_TONE}
 
 {_UNITS}
 
-{_looks_block(looks, _frame_chroma(stats) if stats else None, min_distance, source_kind)}
+{looks_text}
 
 {_LESSONS}
 - {"The RAW development note at the top applies to everything above." if raw else _source_note(source_kind)}
@@ -1923,8 +1970,8 @@ File measurements (not artistic targets): {json.dumps(measurements, ensure_ascii
 Return JSON only. All human-readable text in Chinese:
 {{"reading": {{"scene": "...", "genre": "landscape|portrait|street|night|indoor|product|general",
   "subject": "...", "subject_box": [left, top, right, bottom] or null, "subject_confidence": 0.0,
-  "light": "...", "problems": [{{"issue": "...", "region": "...", "severity": 0.0}}], "preserve": ["..."]}},
- "plans": {{"A": {_PLAN_SHAPE}, "B": {{...}}, "C": {{...}}}}}}"""
+  "light": "...", "problems": [{{"issue": "...", "region": "...", "severity": 0.0}}], "preserve": ["..."]}},{directions_shape}
+ "plans": {{{plans_shape}}}}}"""
 
 
 _MISSES = ("THE MASK DOES NOT COVER THIS BOX: the box did not respond, so the solver left the mask as planned."
@@ -2162,7 +2209,7 @@ def measured_block(solve: dict[str, Any] | None, baseline: dict[str, Any] | None
 
 def review_prompt(slot: str, plan: dict[str, Any], reading: dict[str, Any], gate: dict[str, Any],
                   source_kind: str, measured: str = "", *, looks: dict[str, dict[str, float]] | None = None,
-                  image_chroma: float | None = None, min_distance: float = 5.0) -> str:
+                  image_chroma: float | None = None, min_distance: float = 5.0, role: str | None = None) -> str:
     gate_text = "no pixel damage found."
     if gate.get("hard"):
         gate_text = ("pixel damage that BLOCKS delivery: " + "；".join(gate["hard"])
@@ -2184,7 +2231,7 @@ out, a geometric limit thinner, and the target box as a rectangle with the mask'
 ranges are not drawn. Use it to check that every box sits on the thing it names and every mask on its area;
 judge the picture itself on panel 2 of image 1, which has no drawing on it.
 Photo reading: {json.dumps(reading, ensure_ascii=False)}
-Role of this version: {ROLES.get(slot, '')}
+Role of this version: {role or ROLES.get(slot, '')}
 Intent: {plan.get('intent')}
 Plan as executed (the solver has already set global exposure and saturation, the exposure, temp, tint and
 saturation of masks with a target, and the master curve): {json.dumps(executed, ensure_ascii=False)}
@@ -2311,24 +2358,34 @@ def _reading(raw: Any) -> dict[str, Any]:
             "preserve": [str(x).strip()[:80] for x in (data.get("preserve") or []) if str(x).strip()][:6]}
 
 
-_PLANS_AGAIN = ('\nYour previous answer had no usable "plans" object. Reply with the complete JSON object: "reading" and'
-                ' "plans" with the keys "A", "B" and "C", each a full plan.')
-
-
+_PLANS_AGAIN = ('\nYour previous answer had no usable "plans" object. Reply with the complete JSON object: "reading"{chosen}'
+                ' and "plans" with the keys {keys}, each a full plan.')
 _PLANS_REST = ('\nYour previous answer was cut off after the plan(s) {done}. Reply with a JSON object holding only "plans"'
                ' with the key(s) {missing}, each a full plan in the same format and each clearly different from the plan(s)'
                ' already written (the reading stays as it was). Already written:\n{written}')
+_DIRECTIONS_REST = (' Add "directions" with the key(s) {missing} as well, each chosen as asked above and different from'
+                    ' the directions already chosen: {chosen}.')
+
+
+def _keys_text(slots: list[str]) -> str:
+    quoted = [f'"{slot}"' for slot in slots]
+    return quoted[0] if len(quoted) == 1 else ", ".join(quoted[:-1]) + " and " + quoted[-1]
 
 
 def _plan_rest(settings: Settings, selection: dict[str, Any], prompt: str, images: list[str], audit: dict[str, Any],
-               plans: dict[str, dict[str, Any]], notes: dict[str, list[str]], missing: list[str]) -> None:
-    done = [slot for slot in SLOTS if slot in plans]
+               plans: dict[str, dict[str, Any]], notes: dict[str, list[str]], missing: list[str],
+               chosen: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Ask once for the versions an answer cut short did not hold. With ``chosen`` (the directions chosen so far, in
+    the choosing mode) their directions are asked for too; returns the raw "directions" of the answer."""
+    done = sorted(plans)
     written = json.dumps({slot: _shown(plans[slot]) for slot in done}, ensure_ascii=False)
+    ask = prompt + _PLANS_REST.format(done=", ".join(done), missing=", ".join(missing), written=written)
+    if chosen is not None:
+        ask += _DIRECTIONS_REST.format(missing=", ".join(missing), chosen=json.dumps(chosen, ensure_ascii=False))
     try:
-        data = _ask(settings, selection, prompt + _PLANS_REST.format(done=", ".join(done), missing=", ".join(missing),
-                                                                     written=written), images, audit)
+        data = _ask(settings, selection, ask, images, audit)
     except (VisionUnavailable, ValueError):
-        return
+        return {}
     raw = data.get("plans") if isinstance(data.get("plans"), dict) else data
     for slot in missing:
         if not isinstance(raw.get(slot), dict):
@@ -2342,6 +2399,7 @@ def _plan_rest(settings: Settings, selection: dict[str, Any], prompt: str, image
             plans[slot], notes[slot] = plan, note
         else:
             notes[slot] = note + ["方案没有任何可执行的调整"]
+    return data.get("directions") if isinstance(data.get("directions"), dict) else {}
 
 
 _PLANS_REACH = ('\nMeasured on image 1 before anything was rendered, these region targets cannot be met as written,'
@@ -2442,7 +2500,7 @@ def _plan_reach_fix(settings: Settings, selection: dict[str, Any], prompt: str, 
     """Ask once for the plans whose region targets image 1 shows out of reach or in conflict: the slots replaced,
     what each replacement still flags, and the slots whose answer was refused for flagging more than its plan did
     (that plan is kept; p24-r1 DSC_1963 B 1 flag -> 2, round 0 82; p27-r1 DSC_1515 B 1 -> 2, round 0 77)."""
-    slots = [slot for slot in SLOTS if slot in reach]
+    slots = sorted(reach)
     lines = "\n".join(_reach_line(slot, item, source_kind) for slot in slots for item in reach[slot])
     written = json.dumps({slot: _shown(plans[slot]) for slot in slots}, ensure_ascii=False)
     frame_rule = _REACH_FRAME_RULE["raw" if source_kind == "raw" else "jpeg"]
@@ -2475,15 +2533,134 @@ def _plan_reach_fix(settings: Settings, selection: dict[str, Any], prompt: str, 
     return replaced, after, refused
 
 
-def plan_versions(settings: Settings, selection: dict[str, Any], baseline: Image.Image,
-                  technical: Any, looks: dict[str, dict[str, float]] | None = None) -> dict[str, Any]:
-    """Ask the vision model to read the baseline and write three plans.
+ELEMENTS_EDGE = 768
+_ELEMENTS_PROMPT = """Look at this photograph and name what is in it, to find similar photographs later.
+Return JSON only: {{"elements": ["..."], "light_kind": "...", "genre": "..."}}
+- elements: the visible things its finish depends on, the most important first, at most 6, from this list only:
+  {elements}
+- light_kind: one of {lights}
+- genre: landscape|portrait|street|night|indoor|product|general"""
 
-    ``looks`` (from ``measure_looks``) gives what each look does to this photo.
+
+def read_elements(settings: Settings, selection: dict[str, Any], baseline: Image.Image) -> dict[str, Any]:
+    """The first, short look: the picture's elements and light in experience.py's vocabulary, so what was learned on
+    similar pictures can be found before the directions are chosen. It never stops a job: without an answer the
+    directions are chosen from the picture alone. The result's "audit" holds the transport record."""
+    audit: dict[str, Any] = {}
+    preview = baseline.copy()
+    preview.thumbnail((ELEMENTS_EDGE, ELEMENTS_EDGE))
+    prompt = _ELEMENTS_PROMPT.format(elements=", ".join(experience.ELEMENTS), lights=", ".join(experience.LIGHTS))
+    error = None
+    try:
+        data = _ask(settings, selection, prompt, [_b64(preview, 85)], audit)
+    except (VisionUnavailable, ValueError) as exc:
+        data, error = {}, safe_error(exc)
+    genre = str(data.get("genre") or "general").strip().lower()
+    return {"elements": experience.clean_elements(data.get("elements")),
+            "light_kind": experience.clean_light(data.get("light_kind")),
+            "genre": genre if genre in GENRES else "general", "error": error, "audit": audit}
+
+
+def _direction_entry(direction: experience.Direction, why: str = "", new: bool = False) -> dict[str, Any]:
+    return {"id": direction.id, "title": direction.title, "role": direction.role, "look": direction.look,
+            "why": why, "new": new}
+
+
+def _trio_directions(plans: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The classic trio's directions; a C built on a look is recorded as that look's direction."""
+    library = experience.library()
+    chosen = {}
+    for slot in sorted(plans):
+        direction_id = TRIO.get(slot, "palette")
+        look = (plans[slot].get("look") or {}).get("id")
+        if direction_id == "palette" and f"look:{look}" in library:
+            direction_id = f"look:{look}"
+        chosen[slot] = _direction_entry(library[direction_id]) | {"role": ROLES.get(slot, library[direction_id].role)}
+    return chosen
+
+
+def _plan_title(plan: dict[str, Any]) -> str:
+    """The plan's own title as a direction title, without a trailing note such as （新方向）."""
+    title = re.sub(r"\s*[（(][^（）()]*[）)]\s*$", "", str(plan.get("title") or "")).strip()
+    return title[:24]
+
+
+def _own_direction(title: str, role: str, look: Any, library: dict[str, experience.Direction],
+                   used: set[str]) -> tuple[experience.Direction | None, bool]:
+    """A planner-proposed direction (the library's, when this title was proposed before); None when it is taken."""
+    if not (title and role):
+        return None, False
+    known = library.get(experience.own_id(title))
+    direction = known or experience.Direction(experience.own_id(title), title, role[:1200],
+                                              look=look if look in LOOKS else None, origin="planner")
+    if direction.id in used:
+        return None, False
+    return direction, known is None
+
+
+def _chosen_directions(raw: Any, plans: dict[str, dict[str, Any]], library: dict[str, experience.Direction]
+                       ) -> tuple[dict[str, dict[str, Any]], dict[str, list[str]]]:
+    """slot -> the direction its plan was written to. A is the natural finish.
+
+    A new direction missing its title or role takes them from its plan (title, then why or intent). A missing,
+    unknown or repeated choice falls back to the plan's own look, then dramatic, airy, palette, whichever is unused,
+    then to a new direction named after the plan, with a note. Two versions share a direction only when even that
+    is taken, so their ratings are not learned as one."""
+    data = raw if isinstance(raw, dict) else {}
+    chosen = {"A": _direction_entry(experience.NATURAL)}
+    notes: dict[str, list[str]] = {}
+    used = {experience.NATURAL.id}
+    for slot in sorted(slot for slot in plans if slot != "A"):
+        item = data.get(slot) if isinstance(data.get(slot), dict) else {}
+        plan = plans[slot]
+        asked = str(item.get("id") or "").strip()
+        why = str(item.get("why") or "").strip()[:200]
+        title, role = str(item.get("title") or "").strip()[:24], str(item.get("role") or "").strip()
+        plan_look = (plan.get("look") or {}).get("id")
+        own_role = why or str(plan.get("intent") or "").strip()
+        direction, new = None, False
+        if asked in library and asked not in used and not library[asked].natural:
+            direction = library[asked]
+        elif asked == "new" or (asked == "" and title and role):
+            if not (title and role):
+                notes.setdefault(slot, []).append("新方向缺少标题或说明，按方案的标题和意图补上")
+            direction, new = _own_direction(title or _plan_title(plan), role or own_role,
+                                            item.get("look") or plan_look, library, used)
+        if direction is None:
+            fallback = ([f"look:{plan_look}"] if plan_look else []) + ["dramatic", "airy", "palette"]
+            direction = next((library[d] for d in fallback if d in library and d not in used), None)
+            if direction is None:
+                direction, new = _own_direction(_plan_title(plan), own_role, plan_look, library, used)
+            direction = direction or library["palette"]
+            notes.setdefault(slot, []).append(f"没有可用的方向选择（{asked or '空'}），按方案内容记为 {direction.id}")
+        if direction.look and not plans[slot].get("look"):
+            # A look direction is that look: a plan written without it would be another direction under its name.
+            plans[slot]["look"] = _look({"id": direction.look, "strength": 0.85}, slot, notes.setdefault(slot, []))
+            notes[slot].append(f"方向 {direction.id} 的方案没有写 look，按 0.85 加上")
+        used.add(direction.id)
+        chosen[slot] = _direction_entry(direction, why, new)
+    return chosen, notes
+
+
+def plan_versions(settings: Settings, selection: dict[str, Any], baseline: Image.Image,
+                  technical: Any, looks: dict[str, dict[str, float]] | None = None, *,
+                  slots: list[str] | None = None, library: dict[str, experience.Direction] | None = None,
+                  experience_text: str = "", weights: dict[str, float] | None = None,
+                  elements: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Ask the vision model to read the baseline and write the plans.
+
+    ``looks`` (from ``measure_looks``) gives what each look does to this photo. Without ``library`` it writes the
+    classic trio A/B/C; with it, ``slots`` versions whose directions it chooses (see plan_prompt). The result's
+    "directions" names each version's direction either way.
     """
+    choose = library is not None
+    slots = list(slots or (ALL_SLOTS[:6] if choose else SLOTS))
     audit: dict[str, Any] = {}
     stats = picture_stats(baseline)
-    prompt = plan_prompt(technical, baseline.size, stats, looks, settings.lightroom_candidate_min_distance)
+    prompt = plan_prompt(technical, baseline.size, stats, looks, settings.lightroom_candidate_min_distance,
+                         slots=slots if choose else None, library=library, experience_text=experience_text,
+                         weights=weights, elements=elements)
+    again = _PLANS_AGAIN.format(chosen=', "directions"' if choose else "", keys=_keys_text(slots))
     images = [_b64(baseline), _b64(grid_overlay(baseline))]
     plans: dict[str, dict[str, Any]] = {}
     notes: dict[str, list[str]] = {}
@@ -2491,14 +2668,14 @@ def plan_versions(settings: Settings, selection: dict[str, Any], baseline: Image
     shape = ""
     for attempt in range(2):   # An answer cut short or shaped differently is asked for once more.
         try:
-            data = _ask(settings, selection, prompt if attempt == 0 else prompt + _PLANS_AGAIN, images, audit)
+            data = _ask(settings, selection, prompt if attempt == 0 else prompt + again, images, audit)
         except (VisionUnavailable, ValueError) as exc:
             raise DirectedUnavailable(f"视觉模型没有给出可用的修图方案（{safe_error(exc)}）") from exc
         plans_raw = data.get("plans") if isinstance(data.get("plans"), dict) else {}
         if not plans_raw and isinstance(data.get("A"), dict):   # The versions written at the top level.
-            plans_raw = {slot: data[slot] for slot in SLOTS if isinstance(data.get(slot), dict)}
+            plans_raw = {slot: data[slot] for slot in slots if isinstance(data.get(slot), dict)}
         plans, notes = {}, {}
-        for slot in SLOTS:
+        for slot in slots:
             if slot not in plans_raw:
                 continue
             try:
@@ -2514,11 +2691,15 @@ def plan_versions(settings: Settings, selection: dict[str, Any], baseline: Image
         shape = f"顶层字段 {sorted(str(key) for key in data)[:8]}，plans 字段 {sorted(str(key) for key in plans_raw)[:6]}"
     if "A" not in plans:
         raise DirectedUnavailable(f"视觉模型的方案里没有可执行的 A 版本（{shape}）")
-    missing = [slot for slot in SLOTS if slot not in plans]
+    directions_raw = data.get("directions") if isinstance(data.get("directions"), dict) else {}
+    missing = [slot for slot in slots if slot not in plans]
     if missing:
         # An answer cut short after A (p13-r1 DSC_1441: twice cut, the repaired JSON held A alone, so B and C were
         # never made). The missing versions are asked for once on their own, next to what is already written.
-        _plan_rest(settings, selection, prompt, images, audit, plans, notes, missing)
+        more = _plan_rest(settings, selection, prompt, images, audit, plans, notes, missing,
+                          chosen={slot: directions_raw[slot] for slot in plans if slot in directions_raw}
+                          if choose else None)
+        directions_raw = {**{slot: more[slot] for slot in missing if slot in more}, **directions_raw}
     # Region targets out of their mask's reach from image 1 are asked for once more with the numbers, and the
     # replaced plans that still have some once again: the re-asked plans redraw their boxes, which the first
     # numbers did not measure. tools/reach_after.py p24-p26: 6 of 13 re-asked slots were still flagged, all of
@@ -2528,7 +2709,7 @@ def plan_versions(settings: Settings, selection: dict[str, Any], baseline: Image
     # is not asked again.
     reach: dict[str, Any] = {}
     source_kind = str(_measurements(technical).get("source_kind") or "jpeg")
-    flagged = {slot: found for slot in SLOTS if slot in plans and (found := plan_reach(plans[slot], baseline))}
+    flagged = {slot: found for slot in sorted(plans) if (found := plan_reach(plans[slot], baseline))}
     if flagged:
         replaced, after, refused = _plan_reach_fix(settings, selection, prompt, images, audit, plans, notes,
                                                    flagged, baseline, source_kind)
@@ -2538,9 +2719,17 @@ def plan_versions(settings: Settings, selection: dict[str, Any], baseline: Image
             again, after, refused = _plan_reach_fix(settings, selection, prompt, images, audit, plans, notes,
                                                     still, baseline, source_kind)
             reach["again"] = {"flagged": still, "replaced": again, "after": after, "refused": refused}
+    if choose:
+        directions, direction_notes = _chosen_directions(directions_raw, plans, library)
+        for slot, extra in direction_notes.items():
+            notes.setdefault(slot, []).extend(extra)
+    else:
+        directions = _trio_directions(plans)
     provider = provider_from(selection, (audit.get("calls") or [{}])[-1])
+    # "_prompt" is for re-planning in this job (_apart_fix); run_directed_job takes it out before saving plan.json.
     return {"reading": _reading(data.get("reading")), "plans": plans, "notes": notes, "baseline_stats": stats,
-            "looks": dict(looks or {}), "reach": reach, "provider": provider,
+            "looks": dict(looks or {}), "reach": reach, "provider": provider, "slots": slots, "_prompt": prompt,
+            "directions": directions, "elements": {k: v for k, v in (elements or {}).items() if k != "audit"},
             "temporary_provider": is_temporary(provider), "audit": audit, "prompt_chars": len(prompt)}
 
 
@@ -2559,12 +2748,18 @@ _PLANS_APART = ('\nThe first plans have been rendered. Image 3 is version A\'s r
                 ' review takes 5-8 points for it):\n{lines}\nReply with a JSON object holding only "plans" with the'
                 ' key(s) {slots}, each the full plan in the same format, rewritten so that next to A it reads as its role'
                 ' at a glance. Where the cell tables show near 0 the two look the same: that is where the version has to'
-                ' become different, at about twice the strength of what it does there now. B: another light structure'
-                ' (the surroundings burned with their own limited masks strongly enough to see, the subject separated,'
-                ' tone targets apart from A\'s as its role says); C: another palette on the large areas (a colour target'
-                ' on each large surface it recolours, the look at 0.8-1.0, white balance or calibration). Keep what'
-                ' already differs, keep every region target within what its mask reaches from image 1, and keep the'
-                ' version\'s role; version A stays as written. The plans were:\n{written}')
+                ' become different, at about twice the strength of what it does there now. Their directions:'
+                ' {directions}. A light direction needs another light structure (the surroundings burned with their own'
+                ' limited masks strongly enough to see, the subject separated, tone targets apart from A\'s as its role'
+                ' says); a colour direction another palette on the large areas (a colour target on each large surface'
+                ' it recolours, the look at 0.8-1.0, white balance or calibration). Keep what already differs, keep'
+                ' every region target within what its mask reaches from image 1, and keep the version\'s direction;'
+                ' version A stays as written. The plans were:\n{written}')
+
+
+def _directions_text(slots: Iterable[str], directions: dict[str, dict[str, Any]]) -> str:
+    return "; ".join(f"{slot} {directions[slot]['title']} ({directions[slot]['id']})" if slot in directions else slot
+                     for slot in slots)
 
 
 def _apart_line(slot: str, distance: float, mine: dict[str, Any], theirs: dict[str, Any]) -> str:
@@ -2588,7 +2783,7 @@ def _apart_fix(ctx: _Context, technical: Any, planning: dict[str, Any], firsts: 
     if anchor is None or anchor["round"] is None:
         return {}
     close = {slot: round(render_distance(by_slot[slot]["round"].render, anchor["round"].render), 2)
-             for slot in SLOTS if slot != APART_FROM and slot in by_slot and by_slot[slot]["round"] is not None}
+             for slot in sorted(by_slot) if slot != APART_FROM and by_slot[slot]["round"] is not None}
     close = {slot: distance for slot, distance in close.items() if distance < limit}
     if not close:
         return {}
@@ -2597,15 +2792,17 @@ def _apart_fix(ctx: _Context, technical: Any, planning: dict[str, Any], firsts: 
     stats = {slot: picture_stats(image) for slot, image in renders.items()}
     lines = "\n".join(_apart_line(slot, close[slot], stats[slot], stats[APART_FROM]) for slot in close)
     described = ", ".join(f"image {4 + index} is version {slot}'s" for index, slot in enumerate(close))
-    written = json.dumps({slot: _shown(planning["plans"][slot]) for slot in SLOTS if slot in planning["plans"]},
+    written = json.dumps({slot: _shown(planning["plans"][slot]) for slot in sorted(planning["plans"])},
                          ensure_ascii=False)
-    prompt = plan_prompt(technical, ctx.baseline_image.size, planning.get("baseline_stats"), ctx.looks, limit)
+    prompt = ctx.prompt or plan_prompt(technical, ctx.baseline_image.size, planning.get("baseline_stats"), ctx.looks,
+                                       limit)
     images = [_b64(ctx.baseline_image), _b64(grid_overlay(ctx.baseline_image)), *(_b64(renders[slot])
                                                                               for slot in [APART_FROM, *close])]
+    directions = planning.get("directions") or _trio_directions(planning["plans"])
     try:
         data = _ask(ctx.settings, ctx.selection, prompt + _PLANS_APART.format(
-            images=described, limit=limit, lines=lines, slots=", ".join(close), written=written), images,
-            planning.setdefault("audit", {}))
+            images=described, limit=limit, lines=lines, slots=", ".join(close), written=written,
+            directions=_directions_text(close, directions)), images, planning.setdefault("audit", {}))
     except (VisionUnavailable, ValueError):
         return report
     raw = data.get("plans") if isinstance(data.get("plans"), dict) else data
@@ -2619,6 +2816,9 @@ def _apart_fix(ctx: _Context, technical: Any, planning: dict[str, Any], firsts: 
             continue
         if not is_executable(plan):
             continue
+        look = (directions.get(slot) or {}).get("look")
+        if look and not plan.get("look"):   # A look direction stays on its look (see _chosen_directions).
+            plan["look"] = _look({"id": look, "strength": 0.85}, slot, note)
         before = len(plan_reach(planning["plans"][slot], ctx.baseline_image))
         found = plan_reach(plan, ctx.baseline_image)
         if len(found) > before:
@@ -2646,7 +2846,7 @@ def _apart_fix(ctx: _Context, technical: Any, planning: dict[str, Any], firsts: 
             parked.rename(folder / "round-0")
         return slot, item if kept else None, distance
 
-    with ThreadPoolExecutor(max_workers=max(1, len(candidates))) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, min(len(candidates), RENDER_WORKERS))) as pool:
         results = list(pool.map(attempt, candidates))
     for slot, item, distance in results:
         report["after"][slot] = distance
@@ -2663,13 +2863,65 @@ _CUT_OFF = ("\nYour previous answer was cut off before the score. Keep each \"wh
             " the whole JSON object, score and plan included.")
 
 
+def _damage_items(raw: Any) -> list[dict[str, Any]]:
+    damage = []
+    for item in raw if isinstance(raw, list) else []:
+        if isinstance(item, dict) and str(item.get("region") or "").strip():
+            severity = _number(item.get("severity"))
+            damage.append({"kind": str(item.get("kind") or "detail_loss")[:20], "region": str(item["region"])[:80],
+                           "severity": round(min(1.0, max(0.0, 0.5 if severity is None else severity)), 2)})
+    return damage[:6]
+
+
+# With no revision rounds (directed_max_revisions 0, the default since 2026-11-23) the versions are not reviewed one
+# by one: one request shows image 1 and every version and asks for damage only. Measured on ref-r12/r13 (117
+# reviews): the review's score did not track closeness to the photographer's finished edits (corr -0.01), no review
+# vetoed a render, and each took about 93 s with a 44k-character prompt; taste is learned from the user's picks.
+DAMAGE_EDGE = 1024
+DAMAGE_WITHHOLD = 0.65      # the old review's damage veto
+_DAMAGE_PROMPT = """Image 1 is the unedited render of a photograph. The other images are finished versions of it: {labels}.
+Check each version for DAMAGE only, not for taste: a halo or glow along an edge (a sky against mountains, a figure
+against the sky), a visible mask edge or a band where a gradient stops, a blotch or stain of colour, posterised or
+banded gradients, highlights or shadows clipped where image 1 holds detail, skin turned an unnatural colour, noise
+or artefacts made visible. A different mood, palette, brightness or style is NOT damage: the versions are meant to
+differ from image 1 and from each other.
+Severity: 0.3 visible when you look for it, 0.6 visible at a glance, 0.8 spoils the picture. An empty list means no
+damage. "region" in Chinese.
+Return JSON only: {{"versions": {{{shape}}}}}"""
+
+
+def damage_check(settings: Settings, selection: dict[str, Any], baseline: Image.Image,
+                 renders: dict[str, Path]) -> dict[str, Any]:
+    """One vision request for all versions, damage only: {"versions": {slot: [damage]}, "error", "audit"}."""
+    slots = sorted(renders)
+    labels = ", ".join(f"image {index + 2} is version {slot}" for index, slot in enumerate(slots))
+    shape = ", ".join(f'"{slot}": [{{"kind": "halo|mask_edge|banding|colour_blotch|clipping|skin|artefact",'
+                      ' "region": "...", "severity": 0.0}]' if index == 0 else f'"{slot}": []'
+                      for index, slot in enumerate(slots))
+
+    def small(image: Image.Image) -> str:
+        copy_ = image.copy()
+        copy_.thumbnail((DAMAGE_EDGE, DAMAGE_EDGE))
+        return _b64(copy_, 85)
+
+    images = [small(baseline), *(small(load_preview(renders[slot])) for slot in slots)]
+    audit: dict[str, Any] = {}
+    try:
+        data = _ask(settings, selection, _DAMAGE_PROMPT.format(labels=labels, shape=shape), images, audit)
+    except (VisionUnavailable, ValueError) as exc:
+        return {"versions": {}, "error": safe_error(exc), "audit": audit}
+    raw = data.get("versions") if isinstance(data.get("versions"), dict) else data
+    return {"versions": {slot: _damage_items(raw.get(slot)) for slot in slots}, "error": None, "audit": audit,
+            "provider": provider_from(selection, (audit.get("calls") or [{}])[-1])}
+
+
 def review_version(settings: Settings, selection: dict[str, Any], slot: str, plan: dict[str, Any],
                    reading: dict[str, Any], baseline: Image.Image, render: Image.Image, gate: dict[str, Any],
                    source_kind: str, measured: str = "", *, looks: dict[str, dict[str, float]] | None = None,
-                   image_chroma: float | None = None) -> dict[str, Any]:
+                   image_chroma: float | None = None, role: str | None = None) -> dict[str, Any]:
     audit: dict[str, Any] = {}
     prompt = review_prompt(slot, plan, reading, gate, source_kind, measured, looks=looks, image_chroma=image_chroma,
-                           min_distance=settings.lightroom_candidate_min_distance)
+                           min_distance=settings.lightroom_candidate_min_distance, role=role)
     images = [_board(baseline, render), _b64(mask_overlay(grid_overlay(render), plan))]
     try:
         data = _ask(settings, selection, prompt, images, audit)
@@ -2688,12 +2940,7 @@ def review_version(settings: Settings, selection: dict[str, Any], slot: str, pla
                 "error": safe_error(exc), "audit": audit}
     verdict = str(data.get("verdict") or "").strip().lower()
     confidence = _number(data.get("confidence"))
-    damage = []
-    for item in data.get("damage") or []:
-        if isinstance(item, dict) and str(item.get("region") or "").strip():
-            severity = _number(item.get("severity"))
-            damage.append({"kind": str(item.get("kind") or "detail_loss")[:20], "region": str(item["region"])[:80],
-                           "severity": round(min(1.0, max(0.0, 0.5 if severity is None else severity)), 2)})
+    damage = _damage_items(data.get("damage"))
     checks = [{"item": str(c.get("item") or "")[:40], "status": str(c.get("status") or "")[:12],
                "note": str(c.get("note") or "")[:160]}
               for c in (data.get("checks") or []) if isinstance(c, dict)][:10]
@@ -2720,7 +2967,7 @@ def review_version(settings: Settings, selection: dict[str, Any], slot: str, pla
             revised = None
     return {"verdict": verdict if verdict in {"better", "same", "worse"} else "same",
             "confidence": round(min(1.0, max(0.0, confidence or 0.0)), 2), "score": score,
-            "deductions": deductions[:10], "checks": checks, "damage": damage[:6],
+            "deductions": deductions[:10], "checks": checks, "damage": damage,
             "notes": [str(n)[:200] for n in (data.get("notes") or []) if str(n).strip()][:6],
             "revise": revised is not None, "plan": revised, "plan_notes": plan_notes, "error": None,
             "provider": provider_from(selection, (audit.get("calls") or [{}])[-1]), "audit": audit}
@@ -2838,6 +3085,8 @@ class _Context:
     baseline_stats: dict[str, Any] | None = None
     colors: Callable[[list[dict[str, float]]], list[list[float]]] | None = None
     looks: dict[str, dict[str, float]] = field(default_factory=dict)   # measure_looks: what each look does here
+    prompt: str = ""                                                    # the planning prompt, for re-planning
+    roles: dict[str, str] = field(default_factory=dict)                 # slot -> its direction's role
 
 
 def color_sampler(binary: Path, source: Path) -> Callable[[list[dict[str, float]]], list[list[float]]]:
@@ -2885,8 +3134,11 @@ def _render_plan(binary: Path, source: Path, plan: dict[str, Any], source_kind: 
     ``neutral_reference`` (the unedited render, for a natural-colour version) keeps the colour moves
     off the near-neutral cast gate. ``image`` (image 1), given, lets ``guard_spill`` narrow a lifting
     mask's luminance limit first. ``aspect`` (width / height) sizes radials; it defaults to image 1's.
+    The delivered render of a RAW shot at high ISO or lifted hard gets LightCraft AI Denoise (denoise.decide);
+    the returned document carries it only when the render was denoised.
     """
-    from .lightcraft import render_document
+    from . import denoise
+    from .lightcraft import render_document, render_session
 
     if aspect is None and image is not None:
         aspect = _aspect_of(image)
@@ -2900,15 +3152,26 @@ def _render_plan(binary: Path, source: Path, plan: dict[str, Any], source_kind: 
 
     spill_notes: list[str] = []
     spill: list[dict[str, Any]] = []
-    if image is not None:
-        plan, spill_notes, spill = guard_spill(plan, source_kind, renderer("spill"), image, colors=colors)
-    neutral = (neutral_guard(neutral_reference, RAW_NEUTRAL_GATE if source_kind == "raw" else 1.0)
-               if neutral_reference is not None and neutral_reference.is_file() else None)
-    executed, document, notes, solve = solve_plan(plan, source_kind, renderer("probes"), colors=colors,
-                                                  baseline=baseline, neutral=neutral, aspect=aspect)
-    if spill and solve is not None:
-        solve["spill"] = spill
-    render = render_document(binary, source, document, out_dir / final_name if final_name else out_dir, edge=edge)
+    with render_session(binary, source):   # The spill and solver probes and the final render: one decode.
+        if image is not None:
+            plan, spill_notes, spill = guard_spill(plan, source_kind, renderer("spill"), image, colors=colors)
+        neutral = (neutral_guard(neutral_reference, RAW_NEUTRAL_GATE if source_kind == "raw" else 1.0)
+                   if neutral_reference is not None and neutral_reference.is_file() else None)
+        executed, document, notes, solve = solve_plan(plan, source_kind, renderer("probes"), colors=colors,
+                                                      baseline=baseline, neutral=neutral, aspect=aspect)
+        if spill and solve is not None:
+            solve["spill"] = spill
+        decision = denoise.decide(source, source_kind, document)
+        final = denoise.with_denoise(document, decision["amount"]) if decision else document
+        render = render_document(binary, source, final, out_dir / final_name if final_name else out_dir,
+                                 edge=edge)
+    if decision:
+        if denoise.recorded(render.parent):
+            document = final
+            notes = [*notes, f"AI 降噪 {decision['amount']:g}（ISO {decision['iso']:g}，暗部提亮约 "
+                             f"{decision['stops']:.1f} 档，等效 ISO {decision['effective_iso']:g}）"]
+        else:
+            notes = [*notes, "AI 降噪没有生效（只支持 Bayer 传感器的 RAW，或 LightCraft 无法打开降噪图库），按未降噪导出"]
     return executed, document, spill_notes + notes, solve, render
 
 
@@ -2952,6 +3215,17 @@ def _run_slot(ctx: _Context, first: dict[str, Any], siblings: dict[str, Path]) -
     rounds: list[_Round] = []
     error = first["error"]
     current: _Round | None = first["round"]
+    if ctx.settings.directed_max_revisions == 0:
+        # No revision rounds: the first render is the version, and damage is checked for all versions at once
+        # (damage_check in run_directed_job), not reviewed one by one.
+        if current is None:
+            return {"slot": slot, "status": "withheld", "reason": error or "未通过成片检查", "rounds": []}
+        current.stats = picture_stats(load_preview(current.render))
+        if not current.gate["passed"]:
+            return {"slot": slot, "status": "withheld", "reason": "；".join(current.gate["hard"]) or "未通过成片检查",
+                    "rounds": [current.summary()]}
+        return {"slot": slot, "status": "delivered", "best": current, "rounds": [current.summary()],
+                "source": source, "error": error}
     sibling_stats = ({other: picture_stats(load_preview(path)) for other, path in siblings.items()}
                      if slot != "A" else None)
     while current is not None:
@@ -2965,7 +3239,7 @@ def _run_slot(ctx: _Context, first: dict[str, Any], siblings: dict[str, Path]) -
         current.review = review_version(ctx.settings, ctx.selection, slot, current.plan, ctx.reading,
                                         ctx.baseline_image, render_image, current.gate, ctx.source_kind, measured,
                                         looks=ctx.looks, image_chroma=_frame_chroma(ctx.baseline_stats)
-                                        if ctx.baseline_stats else None)
+                                        if ctx.baseline_stats else None, role=ctx.roles.get(slot))
         (current.render.parent / "review.json").write_text(
             json.dumps(current.summary() | {"audit": current.review.get("audit"), "measured": measured},
                        ensure_ascii=False, indent=2, default=str), encoding="utf-8")
@@ -2991,6 +3265,41 @@ def _run_slot(ctx: _Context, first: dict[str, Any], siblings: dict[str, Path]) -
     best = max(acceptable, key=lambda r: (r.score(), r.index))
     return {"slot": slot, "status": "delivered", "best": best, "rounds": [r.summary() for r in rounds],
             "source": source, "error": error}
+
+
+# LightCraft renders at once. Each version's solve runs its probe renders one after another; the trio always ran
+# three versions side by side, and six RAW develops at once hold six developed images in memory.
+RENDER_WORKERS = 3
+DAMAGE_NAMES = {"halo": "光晕", "mask_edge": "蒙版边缘", "banding": "断层", "colour_blotch": "色斑",
+                "clipping": "高光或暗部溢出", "skin": "肤色异常", "artefact": "瑕疵", "detail_loss": "细节损失"}
+
+
+def _damage_text(damage: dict[str, Any]) -> str:
+    return f"{damage['region']}：{DAMAGE_NAMES.get(damage['kind'], damage['kind'])}"
+
+
+def _check_damage(settings: Settings, selection: dict[str, Any], baseline: Image.Image,
+                  results: list[dict[str, Any]]) -> dict[str, Any]:
+    """With no revision rounds: one damage check over every delivered version (damage_check). Damage of
+    DAMAGE_WITHHOLD or more withholds the version, as the per-version review's veto did; milder damage stays in the
+    version's review. ``results`` are updated in place. Returns the check's record (with its transport audit)."""
+    delivered = {result["slot"]: result for result in results if result["status"] == "delivered"}
+    if not delivered:
+        return {}
+    found = damage_check(settings, selection, baseline, {slot: result["best"].render
+                                                         for slot, result in delivered.items()})
+    for slot, result in delivered.items():
+        damage = found["versions"].get(slot, [])
+        best: _Round = result["best"]
+        best.review = {"verdict": "unavailable" if found["error"] else "checked", "confidence": 0.0, "score": None,
+                       "deductions": [], "checks": [], "notes": [], "damage": damage, "error": found["error"],
+                       "provider": found.get("provider")}
+        if result["rounds"]:
+            result["rounds"][-1]["review"] = dict(best.review)
+        severe = [item for item in damage if item["severity"] >= DAMAGE_WITHHOLD]
+        if severe:
+            result.update(status="withheld", reason="损坏检查：" + "；".join(_damage_text(item) for item in severe))
+    return found
 
 
 def directed_selection(settings: Settings) -> dict[str, Any] | None:
@@ -3025,7 +3334,8 @@ def _critique(planning: dict[str, Any], selection: dict[str, Any]):
 
 def run_directed_job(settings: Settings, conn: sqlite3.Connection, job_id: str, original: Path, root: Path, *,
                      technical: Any, baseline_export: Path, selection: dict[str, Any]) -> dict[str, Any]:
-    """Plan, render, review and deliver A/B/C. Raises DirectedUnavailable when nothing can be delivered."""
+    """Read the picture's elements, plan (choosing directions with local experience), render, check and deliver the
+    versions. Raises DirectedUnavailable when nothing can be delivered."""
     from .db import replace_variants, update_job
     from .lightroom import connect_lightroom
     from .lightroom_qa import render_distance
@@ -3038,7 +3348,21 @@ def run_directed_job(settings: Settings, conn: sqlite3.Connection, job_id: str, 
     baseline_image = load_preview(baseline_export)
     directed_root = root / "directed"
     looks = measure_looks(binary, original, directed_root / "looks", source_kind)
-    planning = plan_versions(settings, selection, baseline_image, technical, looks)
+    # The elements are read first so that what this user picked on similar pictures is in view when the
+    # directions are chosen; the trio (directed_versions 3) keeps its fixed directions and only records them.
+    elements = read_elements(settings, selection, baseline_image)
+    scene = experience.profile(elements, technical)
+    choose = settings.directed_versions > len(SLOTS)
+    library = experience.library(conn)
+    weights = experience.weights(conn, scene, library)
+    experience_text = experience.experience_block(conn, scene, library) if choose else ""
+    planning = plan_versions(settings, selection, baseline_image, technical, looks,
+                             slots=list(ALL_SLOTS[:settings.directed_versions]) if choose else None,
+                             library=library if choose else None, experience_text=experience_text,
+                             weights=weights, elements=elements)
+    prompt = planning.pop("_prompt", "")
+    planning["experience"] = {"profile": scene, "used": bool(experience_text), "chars": len(experience_text)}
+    planning.setdefault("audit", {})["elements"] = elements.get("audit")
     directed_root.mkdir(parents=True, exist_ok=True)
     (directed_root / "plan.json").write_text(json.dumps(planning, ensure_ascii=False, indent=2, default=str),
                                              encoding="utf-8")
@@ -3046,11 +3370,13 @@ def run_directed_job(settings: Settings, conn: sqlite3.Connection, job_id: str, 
     (root / "critique.json").write_text(json.dumps(critique.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
     update_job(conn, job_id, step="lightroom", critique_json=critique.model_dump_json())
 
+    directions = planning["directions"]
     ctx = _Context(settings, selection, binary, root, original, baseline_export, baseline_image,
                    planning["reading"], source_kind, baseline_stats=planning.get("baseline_stats"),
-                   colors=color_sampler(binary, original), looks=looks)
-    slots = [slot for slot in SLOTS if slot in planning["plans"]]
-    with ThreadPoolExecutor(max_workers=len(slots)) as pool:
+                   colors=color_sampler(binary, original), looks=looks, prompt=prompt,
+                   roles={slot: item["role"] for slot, item in directions.items()})
+    slots = [slot for slot in planning["slots"] if slot in planning["plans"]]
+    with ThreadPoolExecutor(max_workers=min(len(slots), RENDER_WORKERS)) as pool:
         # First renders of all versions, so each reviewer knows how far its version is from the others.
         firsts = list(pool.map(lambda slot: _first_round(ctx, slot, planning["plans"][slot],
                                                          planning["notes"].get(slot, [])), slots))
@@ -3059,9 +3385,15 @@ def run_directed_job(settings: Settings, conn: sqlite3.Connection, job_id: str, 
             planning["apart"] = apart
             (directed_root / "plan.json").write_text(json.dumps(planning, ensure_ascii=False, indent=2, default=str),
                                                      encoding="utf-8")
-        rendered ={item["slot"]: item["round"].render for item in firsts if item["round"] is not None}
+        rendered = {item["slot"]: item["round"].render for item in firsts if item["round"] is not None}
         results = list(pool.map(lambda item: _run_slot(
             ctx, item, {other: path for other, path in rendered.items() if other != item["slot"]}), firsts))
+    checked: dict[str, Any] = {}
+    if settings.directed_max_revisions == 0:
+        checked = _check_damage(settings, selection, baseline_image, results)
+        if checked:
+            (directed_root / "damage.json").write_text(json.dumps(checked, ensure_ascii=False, indent=2, default=str),
+                                                       encoding="utf-8")
 
     audit_root = root / "lightroom-audits"
     audit_root.mkdir(parents=True, exist_ok=True)
@@ -3077,8 +3409,18 @@ def run_directed_job(settings: Settings, conn: sqlite3.Connection, job_id: str, 
                  "rounds": result["rounds"]}, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
             continue
         finals[slot] = result
+    # The versions this user is likelier to keep on a picture like this come first (A first on a tie).
+    slot_weights = {slot: weights.get(directions[slot]["id"], 1.0) for slot in finals}
+    order = experience.display_order(slot_weights)
     for slot, result in finals.items():
         best: _Round = result["best"]
+        direction = directions[slot]
+        if direction.get("new"):
+            # A direction the planner proposed is kept under a stable id, so ratings on later photos add up.
+            remembered = experience.remember_direction(conn, direction["title"], direction["role"],
+                                                       direction.get("look"), job_id)
+            direction = {**direction, "id": remembered.id, "title": remembered.title}
+        reason = direction.get("why") or best.plan.get("intent") or best.plan["title"]
         others = [finals[other]["best"].render for other in finals if other != slot]
         nearest = min((render_distance(best.render, other) for other in others), default=None)
         final_path = root / f"variant_{slot}.jpg"
@@ -3096,16 +3438,20 @@ def run_directed_job(settings: Settings, conn: sqlite3.Connection, job_id: str, 
         sidecar = {
             "engine": ENGINE, "source_kind": source_kind, "plan": best.plan, "develop": best.document,
             "intent": intent.model_dump(),
-            "style_workflow": {"method_id": "", "preset_id": (best.plan.get("look") or {}).get("id"),
-                               "mode": "art-directed",
-                               "route_label": best.plan["title"], "selection_reason": best.plan.get("intent", ""),
-                               "adaptation_notes": moves, "manual_gaps": []},
+            "style_workflow": {"method_id": experience.METHOD_PREFIX + direction["id"],
+                               "preset_id": (best.plan.get("look") or {}).get("id"), "mode": "art-directed",
+                               "route_label": best.plan["title"], "direction_title": direction["title"],
+                               "selection_reason": reason, "adaptation_notes": moves, "manual_gaps": []},
+            "experience": experience.sidecar_block(scene, direction, reason, best.render,
+                                                   weight=slot_weights[slot], rank=order.index(slot)),
             "lightroom_pixel_qa": best.gate["report"],
             "visual_review": {"decision": review.get("verdict", "unavailable"), "confidence": review.get("confidence", 0.0),
                               "score": review.get("score"), "deductions": review.get("deductions", []),
                               "notes": review.get("notes", []), "source": review.get("provider") or planning.get("provider"),
                               "checks": review.get("checks", []), "damage": review.get("damage", [])},
             "directed": {"selected_round": best.index, "rounds": len(result["rounds"]),
+                         "max_revisions": settings.directed_max_revisions,
+                         "direction": {key: direction.get(key) for key in ("id", "title", "look", "why", "new")},
                          "compile_notes": best.compile_notes, "plan_notes": best.plan_notes,
                          "gate_advisory": best.gate["advisory"], "tone": best.solve,
                          "vision_provider": planning.get("provider"),
@@ -3119,9 +3465,16 @@ def run_directed_job(settings: Settings, conn: sqlite3.Connection, job_id: str, 
              "accepted_photo": str(result["source"]), "plan": best.plan, "document": best.document,
              "selected_round": best.index, "candidate_selection": selection_info, "rounds": result["rounds"]},
             ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-        verdict = {"better": "视觉复核：有改善", "same": "视觉复核：变化有限", "worse": "视觉复核：有保留意见"}.get(
-            review.get("verdict"), "视觉复核不可用，仅完成技术检查")
-        why = f"{best.plan.get('intent') or best.plan['title']} {verdict}。"
+        if settings.directed_max_revisions:
+            check = {"better": "视觉复核：有改善", "same": "视觉复核：变化有限", "worse": "视觉复核：有保留意见"}.get(
+                review.get("verdict"), "视觉复核不可用，仅完成技术检查")
+        elif review.get("error"):
+            check = "损坏检查不可用，仅完成技术检查"
+        else:
+            mild = review.get("damage") or []
+            check = ("损坏检查发现轻微问题：" + "；".join(_damage_text(item) for item in mild)) if mild else ""
+        why = f"{direction['title']}：{reason}" if direction["title"] != best.plan["title"] else reason
+        why = why.rstrip("。") + "。" + (f" {check}。" if check else "")
         if not selection_info["distinct"]:
             why += " 与其他方案的差别较细微。"
         rows.append({"id": str(uuid.uuid4()), "slot": slot, "look_id": "directed", "title": best.plan["title"],
@@ -3130,25 +3483,31 @@ def run_directed_job(settings: Settings, conn: sqlite3.Connection, job_id: str, 
         summary_slots[slot] = {"status": "delivered", "score": best.gate["report"]["score"], "rounds": len(result["rounds"]),
                                "selected_round": best.index, "issues": best.gate["hard"] + best.gate["advisory"],
                                "review": review.get("verdict"), "review_score": review.get("score"),
-                               "candidate_selection": selection_info, "final": str(final_path)}
+                               "damage": review.get("damage", []), "direction": direction["id"],
+                               "weight": slot_weights[slot], "candidate_selection": selection_info,
+                               "final": str(final_path)}
     if not rows:
-        raise DirectedUnavailable("视觉定向的三个版本都没有通过检查：" + "；".join(o["reason"] for o in omitted))
+        raise DirectedUnavailable("视觉定向的版本都没有通过检查：" + "；".join(o["reason"] for o in omitted))
     rows.sort(key=lambda row: row["slot"])
     replace_variants(conn, job_id, rows)
     similar = [slot for slot, item in summary_slots.items()
                if item.get("status") == "delivered" and not item["candidate_selection"]["distinct"]]
     delivery = {"requested": len(slots), "delivered": len(rows), "omitted": omitted,
-                "distinct_delivered": len(rows) - len(similar), "similar_slots": similar}
+                "distinct_delivered": len(rows) - len(similar), "similar_slots": similar, "order": order}
     temporary = planning.get("temporary_provider", False)
     summary = {"pipeline": ENGINE, "baseline": str(baseline_export), "vision_provider": planning.get("provider"),
                "vision_model": selection.get("resolved_model"), "temporary_provider": temporary,
-               "max_revisions": settings.directed_max_revisions,
+               "max_revisions": settings.directed_max_revisions, "versions": settings.directed_versions,
+               "chosen_directions": choose, "experience_used": bool(experience_text),
+               "damage_check": {"ran": bool(checked), "error": checked.get("error")} if checked else None,
                "slots": summary_slots, "delivery": delivery}
     (root / "lightroom-qa.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    axes = ["baseline", "measure", "vision_elements", "experience" if choose else None,
+            "plan_directions" if choose else "plan", "tone_solve", "render", "damage_gate", "apart",
+            "damage_check" if settings.directed_max_revisions == 0 else "vision_review", "deliver"]
     workflow = {"pipeline": ENGINE, "vision_provider": planning.get("provider"),
                 "vision_model": selection.get("resolved_model"), "temporary_provider": temporary,
-                "axis_order": ["baseline", "measure", "vision_read", "plan", "tone_solve", "render", "damage_gate",
-                               "vision_review", "deliver"]}
+                "axis_order": [axis for axis in axes if axis]}
     (root / "workflow.json").write_text(json.dumps(workflow, ensure_ascii=False, indent=2), encoding="utf-8")
     return summary
 

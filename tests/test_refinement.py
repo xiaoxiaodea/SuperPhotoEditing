@@ -88,13 +88,18 @@ def test_api_multiple_votes_and_revision_request_idempotency(ready, monkeypatch)
         assert release.wait(5)
     monkeypatch.setattr(appmod, "_safe_refine", refine)
     with TestClient(appmod.app) as client:
-        for slot, verdict in (("A", "like"), ("B", "dislike"), ("C", "like")):
+        # like / dislike are the older names of keep / pass.
+        for slot, verdict in (("A", "like"), ("B", "dislike"), ("C", "favorite")):
             response = client.put(f"/api/jobs/photo/ratings/{slot}", json={"verdict": verdict})
             assert response.status_code == 200, response.text
-        assert client.get("/api/jobs/photo").json()["ratings"] == {"A": "like", "B": "dislike", "C": "like"}
+        assert client.get("/api/jobs/photo").json()["ratings"] == {"A": "keep", "B": "pass", "C": "favorite"}
+        # One favourite per photo: the earlier one stays kept.
+        assert client.put("/api/jobs/photo/ratings/A", json={"verdict": "favorite"}).json()["ratings"] == {
+            "A": "favorite", "B": "pass", "C": "keep"}
         client.put("/api/jobs/photo/ratings/B", json={"verdict": None})
         assert client.get("/api/jobs/photo").json()["ratings"]["B"] is None
-        assert client.put("/api/jobs/photo/ratings/D", json={"verdict": "like"}).status_code == 404
+        assert client.put("/api/jobs/photo/ratings/D", json={"verdict": "keep"}).status_code == 404
+        assert client.put("/api/jobs/photo/ratings/A", json={"verdict": "love"}).status_code == 422
         request_id = str(uuid.uuid4())
         body = {"slot": "B", "prompt": " 整体亮一点，保留现在的暖色 ", "request_id": request_id}
         one = client.post("/api/jobs/photo/refinements", json=body)

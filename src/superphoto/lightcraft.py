@@ -10,13 +10,17 @@ from __future__ import annotations
 import json
 import os
 import platform
+import queue
 import shutil
 import tarfile
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.request
 import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -506,22 +510,242 @@ def resolve_wb(binary: Path, source: Path, document: dict[str, Any]) -> dict[str
     return resolved
 
 
+_QUALITY_FORMATS = {".jpg", ".jpeg", ".avif", ".jxl"}
+
+
+class _SessionError(LightCraftError):
+    """The session could not render; a cold render may still work."""
+
+
+class _SessionTimeout(_SessionError):
+    """The session did not answer in time (it has been stopped)."""
+
+
+class RenderSession:
+    """One `lightcraft-cli mcp` process with one photo loaded, rendering develop documents as they come.
+
+    A cold `render` starts the engine and decodes the photo for every file. A plan's solver renders about a
+    dozen probes of the same photo one after another, so the decode dominates: on the 45 MP DSC_1963
+    (2026-11-24) a cold 960px render took 2.4 s, a session render 0.27 s after a first one of 2.2 s
+    (2400px: 3.0 s vs 1.2 s per render; a 45 MP DNG at 960px: 2.7 s vs 1.0 s). Every session render was
+    pixel-identical to the cold one, masks and RAW included, with each document applied to reset settings
+    (``develop.reset``, ``develop.merge``, ``app.export`` in one ``command_batch``). (`run --script -` cannot
+    be used: it reads all of stdin before it answers.)
+
+    Not for several threads at once: renders queue on the session's lock.
+
+    ``library`` opens the photo in that LightCraft library (one process per library), which AI Denoise needs
+    for its product (see denoise.py); without one nothing is written to disk.
+    """
+
+    START_TIMEOUT = 30.0
+
+    def __init__(self, binary: Path, source: Path, *, library: Path | None = None):
+        self.source = Path(source).resolve()
+        self._lock = threading.Lock()
+        self._lines: queue.Queue[str | None] = queue.Queue()
+        self._counter = 0
+        self.alive = False
+        command = [str(binary), "mcp", "--compact"]
+        if library is not None:
+            command.extend(["--library", str(Path(library).resolve())])
+        try:
+            self._proc = subprocess.Popen(
+                [*command, str(self.source)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", bufsize=1)
+        except OSError as exc:
+            raise _SessionError(f"无法启动 LightCraft 会话：{exc}") from exc
+        threading.Thread(target=self._read, name="lightcraft-session", daemon=True).start()
+        self.alive = True
+        try:
+            self._rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                     "clientInfo": {"name": "superphoto", "version": "1"}}, self.START_TIMEOUT)
+            self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        except _SessionError:
+            self.close()
+            raise
+
+    def _read(self) -> None:
+        try:
+            for line in self._proc.stdout:
+                self._lines.put(line)
+        except (OSError, ValueError):
+            pass
+        finally:
+            self._lines.put(None)
+
+    def _send(self, message: dict[str, Any]) -> None:
+        try:
+            self._proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+            self._proc.stdin.flush()
+        except (OSError, ValueError) as exc:
+            self._stop()
+            raise _SessionError("LightCraft 会话已中断") from exc
+
+    def _rpc(self, method: str, params: dict[str, Any], timeout: float) -> dict[str, Any]:
+        if not self.alive:
+            raise _SessionError("LightCraft 会话已关闭")
+        self._counter += 1
+        ident = self._counter
+        self._send({"jsonrpc": "2.0", "id": ident, "method": method, "params": params})
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                line = self._lines.get(timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                self._stop()
+                raise _SessionTimeout("LightCraft 会话超时") from None
+            if line is None:
+                self._stop()
+                raise _SessionError("LightCraft 会话意外退出")
+            try:
+                reply = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(reply, dict) or reply.get("id") != ident:
+                continue
+            if "error" in reply or not isinstance(reply.get("result"), dict):
+                raise _SessionError(f"LightCraft 会话出错：{json.dumps(reply.get('error'), ensure_ascii=False)[:300]}")
+            return reply["result"]
+
+    def render(self, document: dict[str, Any], output: Path, *, edge: int = 0, quality: int = 92,
+               options: dict[str, Any] | None = None, timeout: float = 300.0) -> Path:
+        """Render ``document`` (complete settings, applied to reset ones) to ``output``, as `render` would."""
+        output = Path(output).resolve()
+        export = {"path": str(output), "longEdge": max(0, int(edge)), "conflict": "overwrite", **(options or {})}
+        if output.suffix.lower() in _QUALITY_FORMATS:
+            export["quality"] = quality
+        steps = [{"id": "develop.reset", "params": {}}, {"id": "develop.merge", "params": {"settings": document}},
+                 {"id": "app.export", "params": export}]
+        with self._lock:
+            result = self._rpc("tools/call", {"name": "command_batch",
+                                              "arguments": {"steps": steps, "stop_on_error": True}}, timeout)
+        text = "".join(part.get("text", "") for part in result.get("content") or [] if isinstance(part, dict))
+        try:
+            body = json.loads(text)
+        except ValueError:
+            body = None
+        results = body.get("results") if isinstance(body, dict) else None
+        if (result.get("isError") or not isinstance(results, list) or len(results) != len(steps)
+                or not all(isinstance(r, dict) and r.get("ok") for r in results)):
+            failed = next((r.get("error") for r in results or [] if isinstance(r, dict) and not r.get("ok")), None)
+            raise _SessionError(f"LightCraft 会话导出失败：{str(failed or text)[:300]}")
+        if not output.is_file():
+            raise _SessionError("LightCraft 会话没有写出文件")
+        return output
+
+    def _stop(self) -> None:
+        self.alive = False
+        try:
+            self._proc.kill()
+        except OSError:
+            pass
+
+    def close(self) -> None:
+        """End the process (it exits when its input closes); stopped if it does not within a few seconds."""
+        self.alive = False
+        try:
+            self._proc.stdin.close()
+        except (OSError, ValueError):
+            pass
+        try:
+            self._proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait(timeout=10)
+
+
+_SESSIONS: dict[Path, RenderSession] = {}
+_SESSIONS_LOCK = threading.Lock()
+
+
+def sessions_enabled() -> bool:
+    """SUPERPHOTO_LIGHTCRAFT_SESSIONS=0 (environment or .env) renders every file with its own cold `render`."""
+    from .config import get_settings
+
+    return get_settings().lightcraft_sessions
+
+
+@contextmanager
+def render_session(binary: Path, source: Path) -> Iterator[RenderSession | None]:
+    """Inside this block, render_document renders ``source`` through one LightCraft process.
+
+    Nested blocks for the same file reuse the open session. When none can start (or sessions are turned
+    off), it yields None and every render stays a cold `render`; a session that fails mid-way is dropped
+    the same way, and that render is redone cold.
+    """
+    key = Path(source).resolve()
+    with _SESSIONS_LOCK:
+        existing = _SESSIONS.get(key)
+    if existing is not None or not sessions_enabled() or not Path(binary).is_file():
+        yield existing
+        return
+    try:
+        session = RenderSession(binary, key)
+    except _SessionError:
+        yield None
+        return
+    with _SESSIONS_LOCK:
+        _SESSIONS[key] = session
+    try:
+        yield session
+    finally:
+        with _SESSIONS_LOCK:
+            if _SESSIONS.get(key) is session:
+                del _SESSIONS[key]
+        session.close()
+
+
+def _session_for(source: Path) -> RenderSession | None:
+    with _SESSIONS_LOCK:
+        session = _SESSIONS.get(Path(source).resolve())
+    return session if session is not None and session.alive else None
+
+
 def render_document(binary: Path, source: Path, document: dict[str, Any], destination: Path, *,
-                    edge: int = 0, timeout: float = 300.0) -> Path:
-    """Render one LightCraft develop document to destination/render.jpg.
+                    edge: int = 0, timeout: float = 300.0, name: str = "render.jpg", quality: int = 92,
+                    options: dict[str, Any] | None = None) -> Path:
+    """Render one LightCraft develop document to destination/<name> (render.jpg by default).
 
     The document is written beside the render as develop.json, so every
     delivered file keeps the exact native settings that produced it (an
     as-shot-relative white balance already made absolute, see resolve_wb).
+    ``edge`` 0 renders at full size (cropped). The file format follows the extension of ``name``;
+    ``options`` are passed as ``app.export`` options, e.g. {"bitDepth": 16, "colorSpace": "srgb"}.
+    Inside ``render_session`` for this source the render goes through that session.
+    A document with AI Denoise on renders in a library of its own (denoise.render); when the file cannot be
+    denoised, the setting is dropped from develop.json and the render is the plain one.
     """
+    from . import denoise
+
     document = resolve_wb(binary, source, document)
     destination.mkdir(parents=True, exist_ok=True)
-    output = destination / "render.jpg"
+    output = destination / name
     settings_path = destination / "develop.json"
+    if denoise.requested(document):
+        outcome = denoise.render(binary, source, document, output, edge=edge, quality=quality, options=options,
+                                 timeout=timeout)
+        if outcome != "denoised":
+            document = denoise.without(document)
+        if outcome is not None:
+            settings_path.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
+            return output
     settings_path.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
-    command = [str(binary), "render", str(source), "-o", str(output), "--settings", str(settings_path), "--quality", "92"]
+    session = _session_for(source)
+    if session is not None:
+        try:
+            return session.render(document, output, edge=edge, quality=quality, options=options, timeout=timeout)
+        except _SessionTimeout as exc:
+            raise LightCraftError("LightCraft 导出超时") from exc
+        except _SessionError:
+            pass   # Redone cold: the engine's own error if the document is at fault, else the render.
+    command = [str(binary), "render", str(source), "-o", str(output), "--settings", str(settings_path)]
+    if output.suffix.lower() in _QUALITY_FORMATS:
+        command.extend(["--quality", str(quality)])
     if edge > 0:
         command.extend(["--size", str(edge)])
+    for key, value in (options or {}).items():
+        command.extend(["--opt", f"{key}={json.dumps(value) if not isinstance(value, str) else value}"])
     try:
         completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired as exc:

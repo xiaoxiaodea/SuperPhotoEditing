@@ -4,6 +4,8 @@ const state = {
   jobId: null,
   job: null,
   selected: "A",
+  order: [],          // slots in display order; number keys follow it
+  shownJob: null,     // the job whose cards are on screen
   poll: null,
   refinementPoll: null,
   refinementPosting: false,
@@ -106,6 +108,12 @@ function bind() {
     <div class="version-row"><label class="version-label" for="refine-version">成片版本</label><span class="version-label">可随时切换</span></div>
     <select id="refine-version"></select>
     <a id="version-download" class="btn primary version-download" download>下载当前成片 <span aria-hidden="true">↓</span></a>
+    <div class="full-export" id="full-export">
+      <span class="version-label">原尺寸导出</span>
+      <button type="button" data-full="jpeg" title="原尺寸 JPEG，适合分享和冲印">JPEG</button>
+      <button type="button" data-full="tiff" title="原尺寸 16 位 TIFF，适合继续精修；文件很大">16 位 TIFF</button>
+    </div>
+    <p class="feedback-hint" id="full-status" role="status" aria-live="polite"></p>
     <div class="refine-section">
       <label for="notes">还想做一点调整？</label>
       <textarea id="notes" rows="4" maxlength="1000" placeholder="说说你想要的效果，例如：主体亮一点，保留现在的暖色。"></textarea>
@@ -133,6 +141,7 @@ function bind() {
       $(`tab-${next}`).focus();
     });
   });
+  document.querySelectorAll("[data-full]").forEach(button => button.addEventListener("click", () => exportFullSize(button.dataset.full)));
   document.querySelectorAll("[data-prompt]").forEach(button => {
     button.addEventListener("click", () => {
       $("notes").value = button.dataset.prompt;
@@ -189,9 +198,8 @@ function bind() {
   document.addEventListener("keydown", (e) => {
     if (e.target.closest("input, textarea, select, [contenteditable='true']")) return;
     if (!$("result-stage") || $("result-stage").classList.contains("hidden")) return;
-    if (e.key === "1") selectSlot("A");
-    if (e.key === "2") selectSlot("B");
-    if (e.key === "3") selectSlot("C");
+    // Number keys pick the cards in the order they are shown (best-matching first), not by letter.
+    if (/^[1-9]$/.test(e.key) && state.order[Number(e.key) - 1]) selectSlot(state.order[Number(e.key) - 1]);
     if (e.target.closest("button")) return;
     if (e.key === " " || e.code === "Space") {
       e.preventDefault();
@@ -490,24 +498,32 @@ function renderResult(job) {
 
   const box = $("variants");
   box.innerHTML = "";
-  for (const v of job.variants || []) {
+  const ordered = versionOrder(job.variants || []);
+  state.order = ordered.map(v => v.slot);
+  const many = ordered.length > 3;
+  box.classList.toggle("many", many);
+  box.style.setProperty("--count", String(ordered.length <= 6 ? ordered.length : Math.ceil(ordered.length / 2)));
+  document.body.classList.toggle("many-versions", many);
+  for (const v of ordered) {
     const btn = document.createElement("article");
     btn.className = "variant";
     btn.dataset.slot = v.slot;
+    const direction = v.recipe?.style_workflow?.direction_title || "";
     btn.innerHTML = `
       <div class="variant-main">
         <button type="button" class="variant-preview" aria-label="查看方案 ${v.slot} ${escapeHtml(v.title)}" aria-pressed="false">
           <img src="${v.url}" alt="${escapeHtml(v.title)}" /><span class="slot-letter">${escapeHtml(v.slot)}</span>
         </button>
         <div class="meta">
-          <p class="slot">方案 ${escapeHtml(v.slot)}</p>
+          <p class="slot" title="${escapeHtml(direction)}">方案 ${escapeHtml(v.slot)}${direction ? ` · ${escapeHtml(direction)}` : ""}</p>
           <button type="button" class="variant-title" title="${escapeHtml(v.title)}" aria-label="选择方案 ${escapeHtml(v.slot)} ${escapeHtml(v.title)}">${escapeHtml(v.title)}</button>
           ${qaBadge(v.recipe)}
         </div>
       </div>
       <div class="ratings" aria-label="评价方案 ${v.slot}">
-        <button type="button" class="rating" data-verdict="like" aria-pressed="false">满意</button>
-        <button type="button" class="rating" data-verdict="dislike" aria-pressed="false">不满意</button>
+        <button type="button" class="rating" data-verdict="pass" aria-pressed="false" title="这种处理不适合这张">pass</button>
+        <button type="button" class="rating" data-verdict="keep" aria-pressed="false">留下</button>
+        <button type="button" class="rating" data-verdict="favorite" aria-pressed="false" title="每张照片只有一个最爱">最爱</button>
       </div>
       <p class="rating-status" role="status" aria-live="polite"></p>`;
     btn.querySelector(".variant-preview").addEventListener("click", () => selectSlot(v.slot));
@@ -523,11 +539,22 @@ function renderResult(job) {
       state.versions[v.slot] = (job.refinements || []).filter(r => r.slot === v.slot && r.status === "ready").at(-1)?.id || null;
     }
   }
-  const defaultSlot = (job.variants.find((v) => v.slot === state.selected) || job.variants[0] || {}).slot;
+  // A photo opens on its first card (the version this user is likeliest to keep); a refresh of the same photo
+  // keeps the version being looked at.
+  const same = state.shownJob === job.id && job.variants.find((v) => v.slot === state.selected);
+  state.shownJob = job.id;
+  const defaultSlot = (same || ordered[0] || {}).slot;
   if (defaultSlot) selectSlot(defaultSlot);
   $("judge").classList.remove("hidden");
   watchRefinements();
   refreshHealth();
+}
+
+// The server ranks the versions by what this user kept on similar pictures (sidecar experience.rank, A first on a
+// tie); versions made before that keep their letter order.
+function versionOrder(variants) {
+  const rank = (v) => Number.isInteger(v.recipe?.experience?.rank) ? v.recipe.experience.rank : 99;
+  return [...variants].sort((a, b) => rank(a) - rank(b) || a.slot.localeCompare(b.slot));
 }
 
 function selectSlot(slot) {
@@ -579,10 +606,12 @@ async function rateVariant(slot, requested) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "评价保存失败，请重试");
     if (state.jobId !== jobId) return;
-    state.job.ratings = {...state.job.ratings, [slot]: data.ratings[slot]};
-    updateRating(slot);
+    // A new favourite turns the previous one into a kept version, so refresh every card.
+    state.job.ratings = {...data.ratings};
+    (state.job.variants || []).forEach(v => updateRating(v.slot));
     status.textContent = verdict === null ? "已撤销评价" : !data.learnable ? "已记下评价；这张旧成片缺少推荐所需的场景记录。"
-      : verdict === "dislike" ? "已记下，类似画面会更少推荐这个方向。" : "已记下，类似画面会优先参考这个方向。";
+      : verdict === "pass" ? "已记下：类似画面会少用这个方向，但不会完全排除。"
+      : verdict === "favorite" ? "已设为最爱，类似画面会优先参考这个方向。" : "已留下，类似画面会参考这个方向。";
     $("taste").textContent = data.summary || "";
   } catch (err) {
     status.textContent = String(err.message || err);
@@ -623,6 +652,52 @@ function updateRefinementButton() {
   $("refine-submit").textContent = unavailable ? "当前模式暂不支持微调" : state.refinementPosting ? "正在提交…" : active ? "正在微调这张…" : "开始微调 ↗";
   document.querySelectorAll("[data-prompt]").forEach(button => button.disabled = unavailable || state.refinementPosting || active);
   if (unavailable) $("refine-status").textContent = "基础模式的成片可以下载和评价；文字微调需要启用完整出片引擎。";
+  updateFullExport();
+}
+
+function fullExportKey() {
+  return JSON.stringify([state.jobId, state.selected, selectedVersion()?.id || null]);
+}
+
+function updateFullExport() {
+  // The base mode keeps no LightCraft develop record, so there is nothing to render at full size.
+  const unavailable = state.lightcraftEnabled === false;
+  $("full-export").hidden = unavailable;
+  const busy = state.fullExport && !state.fullExport.done;
+  document.querySelectorAll("[data-full]").forEach(button => button.disabled = Boolean(busy));
+  if (unavailable) { $("full-status").textContent = ""; return; }
+  if (!state.fullExport || state.fullExport.key === fullExportKey()) $("full-status").textContent = state.fullExport?.text || "";
+  else if (state.fullExport.done) $("full-status").textContent = "";
+}
+
+async function exportFullSize(format) {
+  if (state.fullExport && !state.fullExport.done) return;
+  const jobId = state.jobId;
+  const slot = state.selected;
+  const version = selectedVersion()?.id || null;
+  const label = format === "tiff" ? "16 位 TIFF" : "JPEG";
+  const job = state.fullExport = {key: fullExportKey(), done: false,
+    text: `正在导出原尺寸 ${label}，大图约需 10–20 秒…`};
+  updateFullExport();
+  try {
+    const res = await fetch(`/api/jobs/${jobId}/full`, {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({slot, version, format})});
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "原尺寸导出失败，请稍后重试");
+    const link = document.createElement("a");
+    link.href = data.url;
+    link.download = data.filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    const size = data.width && data.height ? `${data.width}×${data.height}，` : "";
+    job.text = `已导出原尺寸 ${label}（${size}${(data.bytes / 1048576).toFixed(1)} MB）。`;
+  } catch (err) {
+    job.text = String(err.message || err);
+  } finally {
+    job.done = true;
+    if (state.fullExport === job) updateFullExport();
+  }
 }
 
 async function submitRefinement() {
@@ -733,6 +808,10 @@ function qaBadge(recipe) {
     const review = recipe.visual_review || {};
     if (review.decision === "better" && Number(review.confidence) >= 0.65) {
       return '<span class="qa-score high">视觉复核有改善</span>';
+    }
+    if (review.decision === "checked") {   // the batched damage check of a many-version job
+      return (review.damage || []).length ? '<span class="qa-score mid">有轻微瑕疵</span>'
+        : '<span class="qa-score high">未见损坏</span>';
     }
     return '<span class="qa-score mid">技术检查通过</span>';
   }

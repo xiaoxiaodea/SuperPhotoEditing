@@ -3,14 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import Settings
+from .db import SLOT_LETTERS
 
 SAFE_FILES = {
     "original",
     "source_preview.jpg",
     "critique_preview.jpg",
-    "variant_A.jpg",
-    "variant_B.jpg",
-    "variant_C.jpg",
+    *(f"variant_{slot}.jpg" for slot in SLOT_LETTERS),
     "technical.json",
     "critique.json",
     "plan.json",

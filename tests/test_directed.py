@@ -104,27 +104,46 @@ def _gate(failing: set[str] = frozenset()):
     return gate
 
 
+ELEMENTS = {"elements": ["water", "boat", "sky", "sunset"], "light_kind": "golden", "genre": "landscape"}
+PLAN_ASK = re.compile(r"Design (three|\d+) finished versions")
+ELEMENTS_ASK = "name what is in it"
+DAMAGE_ASK = "Check each version for DAMAGE only"
+
+
 class FakeVision:
     """Thread-safe scripted vision model keyed by prompt type and slot."""
 
-    def __init__(self, reviews: dict[str, list[dict]], planning: dict | str = PLANNING):
+    def __init__(self, reviews: dict[str, list[dict]], planning: dict | str = PLANNING, *,
+                 elements: dict | None = None, damage: dict | None = None):
         self.reviews = {slot: list(items) for slot, items in reviews.items()}
         self.planning = planning
+        self.elements = ELEMENTS if elements is None else elements
+        self.damage = damage or {}
         self.prompts: list[str] = []
+        self.images: list[int] = []
         self.lock = threading.Lock()
 
     def __call__(self, settings, model, prompt, images, *, selection=None, audit=None, response_schema=None):
         assert model == "grok-test" and selection is SELECTION
-        assert isinstance(images, list) and len(images) == 2 and all(isinstance(i, str) for i in images)
+        assert isinstance(images, list) and all(isinstance(i, str) for i in images)
         assert settings.vision_timeout >= settings.directed_vision_timeout
         if audit is not None:
             audit.update(provider="xai", model="grok-test")
         with self.lock:
             self.prompts.append(prompt)
-            if "Design three finished versions" in prompt:
+            self.images.append(len(images))
+            if ELEMENTS_ASK in prompt:
+                assert len(images) == 1
+                return json.dumps(self.elements)
+            if DAMAGE_ASK in prompt:
+                return json.dumps({"versions": self.damage}, ensure_ascii=False)
+            if "The first plans have been rendered" in prompt:
+                return json.dumps({"plans": {}})
+            assert len(images) == 2
+            if PLAN_ASK.search(prompt):
                 planning = self.planning
                 return planning if isinstance(planning, str) else json.dumps(planning, ensure_ascii=False)
-            slot = re.search(r"reviewing version ([ABC])", prompt).group(1)
+            slot = re.search(r"reviewing version ([A-I])", prompt).group(1)
             return json.dumps(self.reviews[slot].pop(0), ensure_ascii=False)
 
 
@@ -136,7 +155,9 @@ def _review(verdict="better", *, revise_plan=None, checks="achieved", damage=Non
 
 @pytest.fixture
 def job(tmp_path, monkeypatch):
-    settings = Settings(data_dir=tmp_path / "data", lightroom_enabled=True, directed_max_revisions=1)
+    # The classic trio with per-version review; the chosen-directions flow is set per test.
+    settings = Settings(data_dir=tmp_path / "data", lightroom_enabled=True, directed_versions=3,
+                        directed_max_revisions=1)
     conn = connect(settings.db_path)
     init_db(conn)
     insert_job(conn, "job", "photo.jpg")
@@ -605,6 +626,176 @@ def test_reviewer_damage_or_confident_worse_blocks_a_round(job, monkeypatch):
     assert [row["slot"] for row in get_variants(job.conn, "job")] == ["C"]
     reasons = {item["slot"]: item["reason"] for item in summary["delivery"]["omitted"]}
     assert "halo" in reasons["A"] and "变差" in reasons["B"]
+
+
+# --------------------------------------------------------------------------
+# Six versions: elements first, directions chosen with local experience, one damage check
+
+
+LOOK_ID = next(iter(directed.LOOKS))
+NEW_ROLE = "Cool blue-hour mood: the water and sky cooled to a deep blue, the boat kept warm as the one warm note."
+
+
+def _six_planning(directions: dict | None = None) -> dict:
+    return {"reading": PLANNING["reading"],
+            "directions": directions if directions is not None else {
+                "B": {"id": "dramatic", "why": "逆光下的小船适合压暗四周"},
+                "C": {"id": f"look:{LOOK_ID}", "why": "暖色黄昏适合这个色调"},
+                "D": {"id": "new", "title": "蓝调水面", "role": NEW_ROLE, "look": None, "why": "水面占画面一半"},
+                "E": {"id": "airy", "why": "画面通透"},
+                "F": {"id": "bogus", "why": "?"}},
+            "plans": {"A": _plan(0.2, title="自然"), "B": _plan(0.6, title="光影"),
+                      "C": _plan(0.2, title="电影", grading=True), "D": _plan(-0.3, title="蓝调"),
+                      "E": _plan(0.95, title="通透"), "F": _plan(-0.7, title="浓郁")}}
+
+
+def _six(job, **values):
+    job.settings = job.settings.model_copy(update={"directed_versions": 6, "directed_max_revisions": 0, **values})
+
+
+def test_six_versions_read_elements_choose_directions_and_share_one_damage_check(job, monkeypatch):
+    _six(job)
+    vision = FakeVision({}, _six_planning(), damage={
+        "B": [{"kind": "banding", "region": "天空", "severity": 0.3}],
+        "E": [{"kind": "halo", "region": "船身边缘", "severity": 0.8}]})
+    monkeypatch.setattr(directed, "chat_vision", vision)
+    summary = _run(job)
+
+    # The elements are read first, on one small image, and the planner sees them with the direction library.
+    assert ELEMENTS_ASK in vision.prompts[0] and vision.images[0] == 1
+    plan_prompt = next(p for p in vision.prompts if PLAN_ASK.search(p))
+    assert "Design 6 finished versions, A, B, C, D, E, F" in plan_prompt and "DIRECTION LIBRARY" in plan_prompt
+    assert "A first look at the picture found: water, vehicle, sky; light golden" in plan_prompt
+    assert "nothing has been rated yet" in plan_prompt and '"directions"' in plan_prompt
+    # No per-version review: one damage check over every rendered version, image 1 first.
+    assert not any("reviewing version" in p for p in vision.prompts)
+    [damage_at] = [i for i, p in enumerate(vision.prompts) if DAMAGE_ASK in p]
+    assert vision.images[damage_at] == 7 and "image 7 is version F" in vision.prompts[damage_at]
+
+    rows = {row["slot"]: row for row in get_variants(job.conn, "job")}
+    assert set(rows) == {"A", "B", "C", "D", "F"}
+    assert summary["delivery"]["omitted"] == [{"slot": "E", "reason": "损坏检查：船身边缘：光晕"}]
+    sidecars = {slot: json.loads(row["recipe_json"]) for slot, row in rows.items()}
+    methods = {slot: s["style_workflow"]["method_id"] for slot, s in sidecars.items()}
+    own = "own:" + __import__("hashlib").sha1("蓝调水面".encode()).hexdigest()[:10]
+    # F asked for an unknown direction: it falls back to the first unused one (dramatic and airy are taken).
+    assert methods == {"A": "direction:natural", "B": "direction:dramatic", "C": f"direction:look:{LOOK_ID}",
+                       "D": f"direction:{own}", "F": "direction:palette"}
+    # A look direction's plan carries its look; the planner's new direction is remembered for later photos.
+    assert sidecars["C"]["plan"]["look"]["id"] == LOOK_ID
+    assert [(d["id"], d["title"], d["origin_job"]) for d in directed.experience.get_directions(job.conn)] == [
+        (own, "蓝调水面", "job")]
+    assert "没有可用的方向选择（bogus）" in " ".join(sidecars["F"]["directed"]["plan_notes"])
+    # What the experience learns from: the picture's profile, the direction and why, the measured picture.
+    block = sidecars["B"]["experience"]
+    assert block["profile"]["elements"] == ["water", "vehicle", "sky"] and block["profile"]["light"] == "golden"
+    assert block["direction"] == {"id": "dramatic", "title": "戏剧光影", "why": "逆光下的小船适合压暗四周"}
+    assert set(block["picture"]) >= {"black", "mid", "white", "colourfulness", "warmth"} and block["weight"] == 1.0
+    assert directed.experience.variant_profile(rows["B"]) == block["profile"]
+    assert sidecars["B"]["visual_review"]["decision"] == "checked"
+    assert sidecars["B"]["visual_review"]["damage"][0]["kind"] == "banding"
+    assert rows["B"]["why"].startswith("戏剧光影：逆光下的小船适合压暗四周。") and "天空：断层" in rows["B"]["why"]
+    assert "损坏检查" not in rows["A"]["why"] and sidecars["A"]["intent"]["natural_color"] is True
+    assert summary["delivery"]["order"] == ["A", "B", "C", "D", "F"]
+    workflow = json.loads((job.root / "workflow.json").read_text(encoding="utf-8"))
+    assert {"vision_elements", "experience", "plan_directions", "damage_check"} <= set(workflow["axis_order"])
+    assert "vision_review" not in workflow["axis_order"]
+    saved = json.loads((job.root / "directed" / "plan.json").read_text(encoding="utf-8"))
+    assert "_prompt" not in saved and saved["experience"]["used"] is False
+    assert saved["directions"]["D"]["new"] is True and saved["elements"]["light_kind"] == "golden"
+    assert (job.root / "directed" / "damage.json").is_file()
+
+
+def test_picks_on_a_similar_photo_reach_the_planner_and_order_the_versions(job, monkeypatch):
+    _six(job)
+    monkeypatch.setattr(directed, "chat_vision", FakeVision({}, _six_planning()))
+    _run(job)
+    rows = {row["slot"]: row for row in get_variants(job.conn, "job")}
+    from superphoto.db import set_rating
+    from superphoto.scene_preferences import variant_method
+    for slot, verdict in (("B", 2), ("C", -1), ("E", 1)):
+        set_rating(job.conn, "job", slot, verdict, variant_method(rows[slot]),
+                   directed.experience.variant_profile(rows[slot]))
+
+    # The next photo shows the same things in the same light.
+    insert_job(job.conn, "next", "next.jpg")
+    root = job.settings.jobs_dir / "next"
+    original = _jpeg(root / "original.jpg")
+    baseline = _jpeg(root / "lightroom-exports" / "baseline" / "baseline.jpg")
+    vision = FakeVision({}, _six_planning())
+    monkeypatch.setattr(directed, "chat_vision", vision)
+    summary = directed.run_directed_job(job.settings, job.conn, "next", original, root, technical=job.technical,
+                                        baseline_export=baseline, selection=SELECTION)
+    plan_prompt = next(p for p in vision.prompts if PLAN_ASK.search(p))
+    assert "LOCAL EXPERIENCE: this user's own picks" in plan_prompt
+    assert "戏剧光影 (dramatic): favorite 1" in plan_prompt and "pass 1" in plan_prompt
+    assert "not a ban" in plan_prompt
+    # The favourite's direction first, the passed one last; the rest keep their order.
+    order = summary["delivery"]["order"]
+    assert order[0] == "B" and order[1] == "E" and order[-1] == "C"
+    sidecar = json.loads({r["slot"]: r for r in get_variants(job.conn, "next")}["B"]["recipe_json"])
+    assert sidecar["experience"]["weight"] > 1.0 and sidecar["experience"]["rank"] == 0
+    assert json.loads((root / "directed" / "plan.json").read_text(encoding="utf-8"))["experience"]["used"] is True
+
+
+def test_chosen_directions_fall_back_and_never_repeat():
+    library = directed.experience.library()
+    plans = {slot: _plan(0.2, title=slot) for slot in "ABCDE"}
+    plans["E"]["look"] = {"id": LOOK_ID, "strength": 0.9}
+    chosen, notes = directed._chosen_directions({
+        "A": {"id": "dramatic"},                                   # A is always the natural finish.
+        "B": {"id": "dramatic", "why": "w"},
+        "C": {"id": "dramatic"},                                   # Repeated: falls back.
+        "D": {"id": "natural"},                                    # Natural belongs to A.
+        "E": {"id": "new", "title": "", "role": "x"},              # A new direction without a title: its plan's.
+    }, plans, library)
+    assert {slot: item["id"] for slot, item in chosen.items()} == {
+        "A": "natural", "B": "dramatic", "C": "airy", "D": "palette", "E": directed.experience.own_id("E")}
+    assert chosen["E"]["new"] and chosen["E"]["title"] == "E" and chosen["E"]["look"] == LOOK_ID
+    assert set(notes) == {"C", "D", "E"} and chosen["B"]["why"] == "w"
+    # No answer at all still gives every version a direction.
+    chosen, _ = directed._chosen_directions(None, {slot: _plan(0.2, title=slot) for slot in "ABC"}, library)
+    assert [chosen[slot]["id"] for slot in "ABC"] == ["natural", "dramatic", "airy"]
+
+
+def test_an_incomplete_new_direction_is_named_after_its_plan_not_a_taken_one():
+    # Seen with a real model: F asked for a new direction without a role after B-E had used the built-in ones,
+    # and became a second "palette", so its rating would have been learned as C's.
+    library = directed.experience.library()
+    plans = {slot: _plan(0.2, title=slot) for slot in "ABCDEFG"}
+    plans["E"]["look"] = {"id": LOOK_ID, "strength": 0.9}
+    plans["F"]["title"] = "高原冷冽·深青蓝（新方向）"
+    plans["G"]["title"] = "冷暖分区"
+    chosen, notes = directed._chosen_directions({
+        "B": {"id": "dramatic"}, "C": {"id": "palette"}, "D": {"id": "airy"}, "E": {"id": f"look:{LOOK_ID}"},
+        "F": {"id": "new", "title": "", "why": "缺一个冷冽高原的方向"},
+        "G": {"id": "palette"},                                    # Taken, and no built-in left: the plan's title.
+    }, plans, library)
+    assert chosen["F"]["id"] == directed.experience.own_id("高原冷冽·深青蓝")
+    assert chosen["F"]["title"] == "高原冷冽·深青蓝" and chosen["F"]["role"] == "缺一个冷冽高原的方向"
+    assert chosen["G"]["id"] == directed.experience.own_id("冷暖分区") and chosen["G"]["role"] == "G：压天空、提主体"
+    assert chosen["F"]["new"] and chosen["G"]["new"] and set(notes) == {"F", "G"}
+    assert len({item["id"] for item in chosen.values()}) == len(chosen)
+
+
+def test_without_revisions_an_unavailable_damage_check_still_delivers(job, monkeypatch):
+    _six(job, directed_versions=3)
+    vision = FakeVision({})
+
+    def offline_damage(settings, model, prompt, images, **kwargs):
+        if DAMAGE_ASK in prompt:
+            raise VisionUnavailable("offline")
+        return vision(settings, model, prompt, images, **kwargs)
+
+    monkeypatch.setattr(directed, "chat_vision", offline_damage)
+    summary = _run(job)
+    rows = {row["slot"]: row for row in get_variants(job.conn, "job")}
+    assert set(rows) == {"A", "B", "C"} and summary["damage_check"]["error"]
+    assert all("损坏检查不可用" in row["why"] for row in rows.values())
+    # The trio still records its fixed directions, so its picks are learned too.
+    methods = {slot: json.loads(row["recipe_json"])["style_workflow"]["method_id"] for slot, row in rows.items()}
+    assert methods == {"A": "direction:natural", "B": "direction:dramatic", "C": "direction:palette"}
+    assert not any("LOCAL EXPERIENCE" in p or "DIRECTION LIBRARY" in p for p in vision.prompts)
 
 
 def test_planner_failures_raise_directed_unavailable(job, monkeypatch):

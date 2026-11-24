@@ -155,6 +155,29 @@ class SuperPhotoClient:
             raise
         return self._refinement_payload(job_id, record)
 
+    def export_full(self, job_id: str, slot: str, refinement_id: str | None, fmt: str) -> dict[str, Any]:
+        body: dict[str, Any] = {"slot": slot, "format": fmt}
+        if refinement_id:
+            body["version"] = refinement_id
+        # A 45 MP 16-bit TIFF takes about 11 s; leave room for bigger files and a busy machine.
+        result = self._send("POST", f"/api/jobs/{job_id}/full", json=body, timeout=httpx.Timeout(900.0, connect=3.0))
+        name = "".join("_" if char in _UNSAFE else char for char in str(result.get("filename") or ""))
+        path = self.out_dir / job_id / (name or f"{slot}-full")
+        self._download(str(result.get("url") or ""), path)
+        return {
+            "ok": True,
+            "command": "export",
+            "job_id": job_id,
+            "slot": slot,
+            "refinement_id": refinement_id,
+            "format": fmt,
+            "path": str(path),
+            "width": result.get("width"),
+            "height": result.get("height"),
+            "bytes": result.get("bytes"),
+            "effect": "按选中版本的显影记录在原片上重新渲染了原尺寸文件，影调与颜色与预览一致。",
+        }
+
     def _job_payload(self, job: dict[str, Any], command: str) -> dict[str, Any]:
         job_id = str(job.get("id") or "")
         status = str(job.get("status") or "")
@@ -340,6 +363,8 @@ def _dispatch(client: SuperPhotoClient, args: Any, on_step: StepCallback) -> dic
         return client.rate(args.job_id, args.slot, args.verdict)
     if command == "refine":
         return client.refine(args.job_id, args.slot, args.prompt, args.parent, args.timeout, on_step)
+    if command == "export":
+        return client.export_full(args.job_id, args.slot, args.refinement, args.format)
     raise AgentError(f"未知命令：{command}")
 
 

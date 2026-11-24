@@ -211,6 +211,12 @@ def test_bearer_and_browser_cookie_protect_api_and_media(runtime, monkeypatch):
         assert "a secret token" not in cookie
         assert client.get("/api/auth/status").json()["authenticated"] is True
         assert client.get("/media/private/variant_A.jpg").content == b"private image"
+        # Six or more versions per photo: every slot letter is served, nothing beyond them or other job files.
+        (folder / "variant_F.jpg").write_bytes(b"sixth")
+        (folder / "variant_J.jpg").write_bytes(b"no slot")
+        assert client.get("/media/private/variant_F.jpg").content == b"sixth"
+        assert client.get("/media/private/variant_J.jpg").status_code == 404
+        assert client.get("/media/private/variant_F.json").status_code == 404
         assert client.post("/api/auth/logout", headers={"Origin": "http://evil.test"}).status_code == 403
         assert client.post("/api/auth/logout").status_code == 200
         assert client.get("/api/looks").status_code == 401

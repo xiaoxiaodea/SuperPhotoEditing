@@ -7,7 +7,7 @@
     <title>SuperPhoto · 照片工作室</title>
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
     <style>html, body { margin: 0; min-height: 100%; background: #141516; color: #eeeeef; }</style>
-    <link rel="stylesheet" href="./styles.css?v=21" />
+    <link rel="stylesheet" href="./styles.css?v=23" />
   </head>
   <body>
     <header class="top">
@@ -92,7 +92,7 @@
               <figure class="before-figure"><img id="hero-orig" alt="调整前的照片" /><figcaption id="hero-before-label">原片</figcaption></figure>
               <figure class="edit-figure"><img id="hero-edit" alt="当前选中的成片" /><figcaption><span id="hero-label">方案</span></figcaption></figure>
             </div>
-            <div class="canvas-footer"><span class="canvas-hint">按 <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> 切换方案 <span class="hint-divider">/</span> 按住空格对比</span><button type="button" class="hold-orig" id="hold-orig">按住看原片</button></div>
+            <div class="canvas-footer"><span class="canvas-hint">按数字键 <kbd>1</kbd> <kbd>2</kbd> … 切换方案 <span class="hint-divider">/</span> 按住空格对比</span><button type="button" class="hold-orig" id="hold-orig">按住看原片</button></div>
             <div class="filmstrip-head"><p class="kicker" id="result-count">后期成片</p><span>选择你的方向</span></div>
             <div class="variants" id="variants"></div>
             <p class="compare-hint hidden" id="delivery-note"></p>
@@ -129,6 +129,6 @@
       <div id="vision-body"></div>
       <p id="vision-error" class="vision-error" role="alert"></p>
     </dialog>
-    <script src="./app.js?v=21"></script>
+    <script src="./app.js?v=23"></script>
   </body>
 </html>

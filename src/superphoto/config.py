@@ -63,6 +63,14 @@ class Settings(BaseSettings):
     # Executable lightcraft-cli. Empty uses PATH, then vendor/lightcraft/lightcraft-cli.
     lightcraft_bin: Path | None = None
     lightroom_export_edge: int = 2400
+    # One LightCraft process per plan renders its probes without decoding the photo again (about 5x faster).
+    # False renders every file with its own process, as before 2026-11-24.
+    lightcraft_sessions: bool = True
+    # LightCraft AI Denoise on the delivered render of a Bayer RAW shot at high ISO or lifted hard (denoise.py).
+    ai_denoise: bool = True
+    # Denoised raw data kept under data/denoise for later renders and full-size exports (about 150 MB per 45 MP
+    # photo); the least recently used goes first.
+    ai_denoise_cache_gb: float = Field(default=4.0, ge=0, le=500)
     lightroom_qa_min_score: float = 82.0
     lightroom_qa_max_refinements: int = 2
     lightroom_candidate_min_distance: float = 5.0
@@ -80,9 +88,14 @@ class Settings(BaseSettings):
     # and reviews the renders; otherwise the legacy slider pipeline runs.
     # directed: fail instead of falling back. legacy: never use the vision planner.
     pipeline_mode: Literal["auto", "directed", "legacy"] = "auto"
-    # Review-and-revise rounds per candidate after its first render.
-    directed_max_revisions: int = Field(default=2, ge=0, le=3)
-    # Planning returns three complete versions; reasoning models need longer than a review.
+    # Versions per photo. Above 3 the vision model reads the picture's elements and chooses each version's
+    # direction (A stays the natural finish) with what this user kept, favourited and passed on similar pictures;
+    # 3 is the fixed natural / dramatic / palette trio the benchmarks were run with.
+    directed_versions: int = Field(default=6, ge=3, le=9)
+    # Review-and-revise rounds per candidate after its first render. 0: no per-version review; one batched
+    # damage check over all versions instead (the review's score did not track quality, see directed.py).
+    directed_max_revisions: int = Field(default=0, ge=0, le=3)
+    # Planning returns all versions in one answer; reasoning models need longer than a review.
     directed_vision_timeout: float = Field(default=240.0, gt=0, le=900)
 
     @property

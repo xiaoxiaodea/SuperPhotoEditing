@@ -56,7 +56,7 @@ def test_independent_ratings_are_idempotent_reversible_and_positive_boosts(tmp_p
         set_rating(conn, "photo", "B", -1, "sculpted", profile)
         set_rating(conn, "photo", "C", 1, "soft_warm", profile)
     assert len(preference_samples(conn)) == 3
-    assert get_ratings(conn, "photo") == {"A": "like", "B": "dislike", "C": "like"}
+    assert get_ratings(conn, "photo") == {"A": "keep", "B": "pass", "C": "keep"}
     assert select_methods(conn, critique, technical, seed="x")["weights"]["soft_warm"] > 3
     set_rating(conn, "photo", "B", 1, "sculpted", profile)
     assert select_methods(conn, critique, technical, seed="x")["weights"]["sculpted"] > 3

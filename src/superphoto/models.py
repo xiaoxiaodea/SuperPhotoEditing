@@ -581,12 +581,17 @@ class VariantPlan(BaseModel):
     intent: EditIntent = Field(default_factory=EditIntent)
 
 
+# A directed photo carries up to nine versions (db.SLOT_LETTERS); the legacy pipeline still makes A/B/C.
+Slot = Literal["A", "B", "C", "D", "E", "F", "G", "H", "I"]
+
+
 class RatingIn(BaseModel):
-    verdict: Literal["like", "dislike"] | None
+    # pass / keep / favorite; like and dislike are kept for older clients and mean keep and pass.
+    verdict: Literal["pass", "keep", "favorite", "like", "dislike"] | None
 
 
 class RefinementIn(BaseModel):
-    slot: Literal["A", "B", "C"]
+    slot: Slot
     prompt: str = Field(min_length=2, max_length=1000)
     request_id: UUID
     parent_id: UUID | None = None
@@ -597,8 +602,15 @@ class RefinementIn(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
+class FullExportIn(BaseModel):
+    # Full-size delivery of one finish: the version shown (a refinement id, or none for the first finish).
+    slot: Slot
+    version: UUID | None = None
+    format: Literal["jpeg", "tiff"] = "jpeg"
+
+
 class FeedbackIn(BaseModel):
-    chosen_slot: Literal["A", "B", "C"]
+    chosen_slot: Slot
     reaction: Literal[
         "keep",
         "too_dark",

@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 
 from .config import get_settings
-from .db import connect, init_db
+from .db import SLOT_LETTERS, connect, init_db
 from .pipeline import run_job
 
 
@@ -47,16 +47,21 @@ def main(argv: list[str] | None = None) -> None:
     edit.add_argument("--timeout", type=float, default=2700)
     job = agent_sub.add_parser("job", help="read one job and download any delivered images")
     job.add_argument("job_id")
-    rate = agent_sub.add_parser("rate", help="remember a like or dislike for later photos")
+    rate = agent_sub.add_parser("rate", help="pass, keep or favourite one version; later photos learn from it")
     rate.add_argument("job_id")
-    rate.add_argument("slot", choices=("A", "B", "C"))
-    rate.add_argument("verdict", choices=("like", "dislike", "clear"))
+    rate.add_argument("slot", choices=tuple(SLOT_LETTERS))
+    rate.add_argument("verdict", choices=("pass", "keep", "favorite", "like", "dislike", "clear"))
     refine = agent_sub.add_parser("refine", help="re-render one finish from a short note")
     refine.add_argument("job_id")
-    refine.add_argument("slot", choices=("A", "B", "C"))
+    refine.add_argument("slot", choices=tuple(SLOT_LETTERS))
     refine.add_argument("prompt")
     refine.add_argument("--parent", default=None)
     refine.add_argument("--timeout", type=float, default=1200)
+    export = agent_sub.add_parser("export", help="render one finish at full size (JPEG or 16-bit TIFF) and download it")
+    export.add_argument("job_id")
+    export.add_argument("slot", choices=tuple(SLOT_LETTERS))
+    export.add_argument("--refinement", default=None, help="a ready refinement id; default the first finish")
+    export.add_argument("--format", choices=("jpeg", "tiff"), default="jpeg")
 
     args = parser.parse_args(argv)
     if args.cmd in (None, "app"):

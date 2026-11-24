@@ -60,19 +60,44 @@ def init_db(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             FOREIGN KEY(job_id) REFERENCES jobs(id)
         );
-        CREATE TABLE IF NOT EXISTS ratings (
+        """ + _RATINGS.format(name="ratings") + _REFINEMENTS.format(name="refinements") + """
+        CREATE TABLE IF NOT EXISTS directions (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            role TEXT NOT NULL,
+            look_id TEXT,
+            origin_job TEXT,
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+    _widen_slots(conn)
+    conn.executescript(_INDEXES)
+    conn.commit()
+
+
+# A photo gets up to len(SLOT_LETTERS) versions (A is the natural finish). Ratings: -1 pass (this treatment is not
+# for this photo; a weak, scene-local signal), 1 keep, 2 favourite (the version the user would deliver), 0 undone.
+SLOT_LETTERS = "ABCDEFGHI"
+VERDICTS = {"pass": -1, "keep": 1, "favorite": 2}
+VERDICT_NAMES = {-1: "pass", 0: None, 1: "keep", 2: "favorite"}
+_SLOT_CHECK = f"CHECK(length(slot) = 1 AND slot BETWEEN 'A' AND '{SLOT_LETTERS[-1]}')"
+# {name} lets the migration build the new table beside the old one; references stay on the final names.
+_RATINGS = """
+        CREATE TABLE IF NOT EXISTS {name} (
             job_id TEXT NOT NULL REFERENCES jobs(id),
-            slot TEXT NOT NULL CHECK(slot IN ('A','B','C')),
-            verdict INTEGER NOT NULL CHECK(verdict IN (-1,0,1)),
+            slot TEXT NOT NULL {slot_check},
+            verdict INTEGER NOT NULL CHECK(verdict IN (-1,0,1,2)),
             method_id TEXT NOT NULL,
             scene_json TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             PRIMARY KEY(job_id, slot)
-        );
-        CREATE TABLE IF NOT EXISTS refinements (
+        );""".replace("{slot_check}", _SLOT_CHECK)
+_REFINEMENTS = """
+        CREATE TABLE IF NOT EXISTS {name} (
             id TEXT PRIMARY KEY,
             job_id TEXT NOT NULL REFERENCES jobs(id),
-            slot TEXT NOT NULL CHECK(slot IN ('A','B','C')),
+            slot TEXT NOT NULL {slot_check},
             parent_id TEXT REFERENCES refinements(id),
             prompt TEXT NOT NULL,
             status TEXT NOT NULL,
@@ -83,13 +108,38 @@ def init_db(conn: sqlite3.Connection) -> None:
             filename TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
-        );
+        );""".replace("{slot_check}", _SLOT_CHECK)
+_INDEXES = """
         CREATE INDEX IF NOT EXISTS refinements_job ON refinements(job_id, created_at);
         CREATE UNIQUE INDEX IF NOT EXISTS refinements_one_active
-            ON refinements(job_id, slot) WHERE status IN ('queued', 'running');
-        """
-    )
+            ON refinements(job_id, slot) WHERE status IN ('queued', 'running');"""
+
+
+def _widen_slots(conn: sqlite3.Connection) -> None:
+    """Rebuild ratings / refinements made when a photo had only A/B/C and a rating was like or dislike."""
+    old = [name for name, sql in conn.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='table' AND name IN ('ratings', 'refinements')")
+        if "IN ('A','B','C')" in (sql or "")]
+    if not old:
+        return
+    # SQLite's table-rebuild order: build the new table beside the old one, copy, drop the old, rename the new.
+    # (Renaming the old table first would rewrite refinements' self-reference to the temporary name.)
+    steps = ["BEGIN;"]
+    for name in old:
+        steps += [(_RATINGS if name == "ratings" else _REFINEMENTS).format(name=f"{name}_wide"),
+                  f"INSERT INTO {name}_wide SELECT * FROM {name};",
+                  f"DROP TABLE {name};",
+                  f"ALTER TABLE {name}_wide RENAME TO {name};"]
     conn.commit()
+    conn.execute("PRAGMA foreign_keys=OFF")      # foreign_keys cannot change inside a transaction.
+    try:
+        conn.executescript("\n".join([*steps, "COMMIT;"]))
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
 
 
 @contextmanager
@@ -210,19 +260,34 @@ def look_stats(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 def get_ratings(conn: sqlite3.Connection, job_id: str) -> dict[str, str | None]:
-    names = {1: "like", -1: "dislike", 0: None}
-    return {r["slot"]: names[r["verdict"]] for r in conn.execute(
+    return {r["slot"]: VERDICT_NAMES[r["verdict"]] for r in conn.execute(
         "SELECT slot, verdict FROM ratings WHERE job_id = ?", (job_id,))}
 
 
 def set_rating(conn: sqlite3.Connection, job_id: str, slot: str, verdict: int,
                method_id: str, scene: dict) -> None:
-    # Keep neutral rows as explicit undo markers, including for legacy feedback.
-    conn.execute("""INSERT INTO ratings VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(job_id, slot) DO UPDATE SET verdict=excluded.verdict,
-        method_id=excluded.method_id, scene_json=excluded.scene_json, updated_at=excluded.updated_at""",
-        (job_id, slot, verdict, method_id, json.dumps(scene), utcnow()))
+    with tx(conn):
+        if verdict == VERDICTS["favorite"]:
+            # One favourite per photo: an earlier favourite stays a kept version.
+            conn.execute("UPDATE ratings SET verdict = ?, updated_at = ? WHERE job_id = ? AND slot != ? AND verdict = ?",
+                         (VERDICTS["keep"], utcnow(), job_id, slot, VERDICTS["favorite"]))
+        # Keep neutral rows as explicit undo markers, including for legacy feedback.
+        conn.execute("""INSERT INTO ratings VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id, slot) DO UPDATE SET verdict=excluded.verdict,
+            method_id=excluded.method_id, scene_json=excluded.scene_json, updated_at=excluded.updated_at""",
+            (job_id, slot, verdict, method_id, json.dumps(scene), utcnow()))
+
+
+def insert_direction(conn: sqlite3.Connection, direction_id: str, title: str, role: str,
+                     look_id: str | None = None, origin_job: str | None = None) -> None:
+    """Remember a direction the planner proposed, so later photos can be offered it and its ratings add up."""
+    conn.execute("INSERT OR IGNORE INTO directions VALUES (?, ?, ?, ?, ?, ?)",
+                 (direction_id, title, role, look_id, origin_job, utcnow()))
     conn.commit()
+
+
+def get_directions(conn: sqlite3.Connection) -> list[dict]:
+    return [dict(r) for r in conn.execute("SELECT * FROM directions ORDER BY created_at, id")]
 
 
 def get_refinement(conn: sqlite3.Connection, refinement_id: str) -> dict | None:

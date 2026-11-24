@@ -8,9 +8,9 @@
 
 1. **基线**：沿用 `pipeline._prepare_lightroom_baseline` 导出的未编辑 LightCraft 渲染，以及同一结果上的技术分析。
 2. **规划**：一次视觉请求，发送基线和带 0.1 坐标网格的副本。模型返回读图（场景、主体框、问题按严重度排序、需保留的特征）以及 A / B / C 三套完整方案。提示词写明蒙版坐标约定（径向 `rx` 按图宽、`ry` 按图高的比例）、常用幅度，以及此前实测的教训：亮场景不整体压灰、暗场景局部提亮并保护灯光、雾是气氛、避免青绿偏色、JPEG 亮部没有可恢复的细节。
-3. **清洗与编译**：`sanitize_plan` 只保留支持的控件，数值裁到安全范围，丢弃未知键，色轮色相按 360 取模，最多 6 个蒙版，退化形状（起止点重合、半径为 0）直接丢弃。所有改动写入备注。`compile_document` 生成 LightCraft 显影 JSON。JPEG 的全局色温按 6500K / 0 的恒等基值偏移；RAW 拿不到拍摄色温，因此不执行全局色温偏移。
+3. **清洗与编译**：`sanitize_plan` 只保留支持的控件，数值裁到安全范围，丢弃未知键，色轮色相按 360 取模，最多 6 个蒙版，退化形状（起止点重合、半径为 0）直接丢弃。所有改动写入备注。`compile_document` 生成 LightCraft 显影 JSON。JPEG 的全局色温按 6500K / 0 的恒等基值偏移。RAW 的偏移先记作 `asShotOffset`，渲染时由 `lightcraft.resolve_wb` 读出这张 RAW 的拍摄色温（`develop.wb`），换算成绝对值；读不到时不执行全局色温偏移。
 4. **渲染与损坏检查**：每个版本在原片副本上渲染，三个版本并行。`safety_gate` 复用 `lightroom_qa.assess_lightroom_render`，但 `too_dark`、`too_bright`、`excessive_distance`、`exposure_unresolved`、`exposure_lift_unresolved` 只作为提示。另设线性亮度比的硬边界 0.3–3.5，约 −1.75 至 +1.8 EV，只拦截灾难性结果。
-5. **复核与修订**：发送「基线 | 成片」对照板和带网格的成片，以及方案和检查结果。模型逐项判断每个蒙版的目的是达成、部分达成、未达成还是过度，列出损坏，并可返回完整修订方案，方向不限：加强、减弱、移动或缩放蒙版。默认修订 1 轮（`SUPERPHOTO_DIRECTED_MAX_REVISIONS`）。
+5. **复核与修订**：发送「基线 | 成片」对照板和带网格的成片，以及方案和检查结果。模型逐项判断每个蒙版的目的是达成、部分达成、未达成还是过度，列出损坏，并可返回完整修订方案，方向不限：加强、减弱、移动或缩放蒙版。修订轮数由 `SUPERPHOTO_DIRECTED_MAX_REVISIONS` 控制；2026-11-23 起默认 0，即不逐版复核，改为一次合并的损坏检查（见[多套方案与本地经验](many-versions-2026-11-23.md)）。
 6. **选择与交付**：满足以下全部条件的轮次才有效：通过损坏检查、复核没有以置信度 ≥0.7 判为变差、没有严重度 ≥0.65 的损坏。在有效轮次中按「判定 + 达成比例 − 损坏」取最高分，同分时取较新的一轮。没有有效轮次的版本单独撤下；三个版本都被撤下时抛出 `DirectedUnavailable`。
 
 `pipeline.run_job` 在写完预览后进入此流程。`auto` 模式在没有视觉模型、全部撤下或出现意外错误时回到原有流程，原因写入 `directed-fallback.json`（意外错误的堆栈另存为 `directed-error.txt`）；`directed` 模式直接报错。
@@ -41,6 +41,6 @@
 - **还没有用真实视觉模型跑过**：本机没有密钥。把 `XAI_API_KEY` 写入 `.env` 后，先运行 `uv run superphoto vision-check --list-models`，再运行 `.task-cache/directed-grok-benchmark/run.py`（`directed` 模式，5 张复验照片，输出「基线 | 手写定向 | A | B | C」对照图）。模型能否准确放置蒙版，是这一流程最大的未知数。
 - Grok（xAI）只是临时替代。`auto` 的顺序为 Ollama → OpenAI-compatible → xAI，所以本机 Ollama 或配置好的其他视觉模型一旦可用，就会自动取代 Grok，不需要改代码。使用 Grok 时，`directed/plan.json`、`lightroom-qa.json`、`workflow.json` 和 sidecar 的 `directed` 字段都会写入 `temporary_provider: true`，`vision-check` 的报告里也会带上提示。如需固定使用 Grok，设置 `SUPERPHOTO_VISION_PROVIDER=xai`。
 - 未使用 LightCraft 的亮度范围蒙版（需要 `lo_feather` 等字段），也未使用画笔；几何蒙版的羽化可以掩盖少量位置误差。
-- RAW 的全局色温不执行偏移；所有复验照片都是 JPEG，RAW 尚未测试。
+- ~~RAW 的全局色温不执行偏移~~：已改为相对拍摄色温偏移（见第 3 步）。例如沙漠 RAW DSC05752 拍摄色温 5551K / +12，暖到 7000K 后，画面色彩度从 .186 升到 .283。
 - 差异目标仍沿用平均 Lab 距离 5.0。B 与 A 意图相同，可能被标为“差别较细微”，这只是提示，不会撤下。
-- 定向成片的满意 / 不满意评价目前没有方法标识（`method_id` 为空），还不参与相似场景的偏好学习。
+- ~~定向成片的评价没有方法标识~~：2026-11-23 起 sidecar 的 `method_id` 为 `direction:<id>`，评价参与相似画面的方向学习；默认改为每张 6 套方案、不逐版复核，见[多套方案与本地经验](many-versions-2026-11-23.md)。
