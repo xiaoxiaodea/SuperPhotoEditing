@@ -18,6 +18,7 @@
       <span class="workspace-label">照片工作室</span>
       <div class="top-actions">
         <button type="button" id="new-photo" class="btn ghost hidden"><span aria-hidden="true">＋</span> 导入新照片</button>
+        <button type="button" id="studio-open" class="btn ghost">水印与拼图</button>
         <button type="button" id="vision-open" class="btn ghost">视觉模型</button>
         <details class="engine-status">
           <summary><span class="status-dot" aria-hidden="true"></span>引擎状态</summary>
@@ -176,6 +177,7 @@
             <span id="sync-progress-meta" class="sync-sub"></span>
           </div>
           <div class="sync-head-actions">
+            <button type="button" id="sync-to-collage" class="btn ghost hidden">一键九宫格拼图预览 <span aria-hidden="true">↗</span></button>
             <a id="sync-zip" class="btn primary hidden" download>打包下载全部成片 (.zip) <span aria-hidden="true">↓</span></a>
           </div>
         </div>
@@ -184,7 +186,283 @@
       </div>
     </dialog>
 
+    <dialog id="studio-dialog" class="studio-dialog" aria-labelledby="studio-title">
+      <div class="st-head">
+        <div class="st-brand">
+          <span class="eyebrow">EXIF WATERMARK &amp; MOMENTS STUDIO</span>
+          <h2 id="studio-title">水印与拼图工坊</h2>
+        </div>
+        <div class="st-mode-tabs" role="tablist" aria-label="工坊模式">
+          <button type="button" id="st-tab-wm" role="tab" aria-selected="true" class="active">EXIF 照片水印</button>
+          <button type="button" id="st-tab-collage" role="tab" aria-selected="false">自动拼图 · 朋友圈九宫格</button>
+        </div>
+        <button type="button" class="btn ghost" id="studio-close" aria-label="关闭">关闭</button>
+      </div>
+
+      <p id="st-error" class="vision-error st-error" role="alert"></p>
+
+      <!-- Panel 1: EXIF Photo Watermark -->
+      <section id="st-pane-wm" class="st-pane" role="tabpanel" aria-labelledby="st-tab-wm">
+        <div class="st-stage">
+          <div class="st-stage-bar">
+            <div class="st-stage-sources">
+              <input id="wm-upload-input" type="file" multiple accept=".jpg,.jpeg,.png,.tif,.tiff,.arw,.cr2,.cr3,.nef,.dng,.raf,.orf,.rw2,.pef,.srw,.raw" hidden />
+              <button type="button" class="btn ghost st-sm-btn" id="wm-upload-btn">＋ 上传本地照片</button>
+              <button type="button" class="btn ghost st-sm-btn hidden" id="wm-load-current">导入当前成片</button>
+              <button type="button" class="btn ghost st-sm-btn" id="wm-pick-library">从历史作品选图</button>
+            </div>
+            <div class="st-stage-view">
+              <span id="wm-exif-badge" class="st-pill">等待选择照片</span>
+              <button type="button" class="st-chip-btn" id="wm-bg-toggle" title="切换画布底色以便检查白边或黑边">浅格背景</button>
+            </div>
+          </div>
+
+          <div class="st-library-drawer hidden" id="wm-library-drawer">
+            <div class="st-drawer-head"><strong>选择已修好的作品或同风格组图</strong><button type="button" class="st-chip-btn" id="wm-library-close">收起</button></div>
+            <div class="st-library-list" id="wm-library-list"></div>
+          </div>
+
+          <div class="st-canvas" id="wm-canvas" tabindex="0">
+            <div class="st-empty" id="wm-empty">
+              <strong>拖放照片到这里，或点击上方上传 / 导入成片</strong>
+              <p>系统会自动提取原片中的相机机型、镜头、焦距、光圈、快门速度、ISO 与拍摄时间，生成专业摄影参数边框。</p>
+            </div>
+            <img id="wm-preview-img" class="hidden" alt="水印实时预览" />
+            <span class="st-loading hidden" id="wm-loading">正在渲染预览…</span>
+          </div>
+
+          <div class="st-wm-strip hidden" id="wm-strip"></div>
+        </div>
+
+        <aside class="st-controls">
+          <div class="st-group">
+            <div class="st-group-head"><span>水印模板</span><span class="st-hint-inline">6 种摄影装裱风格</span></div>
+            <div class="st-style-grid" id="wm-style-grid"></div>
+          </div>
+
+          <div class="st-group">
+            <div class="st-group-head">
+              <span>自动提取的 EXIF 参数</span>
+              <button type="button" class="st-link-btn" id="wm-reset-exif">恢复原片信息</button>
+            </div>
+            <div class="st-form-grid">
+              <label>相机机型<input id="wm-camera" type="text" placeholder="例如：NIKON Z 7II" /></label>
+              <label>品牌标识<select id="wm-brand"></select></label>
+              <label class="st-span2">镜头型号<input id="wm-lens" type="text" placeholder="例如：NIKKOR Z 24-120mm f/4 S" /></label>
+            </div>
+            <div class="st-form-grid4">
+              <label>焦距<input id="wm-focal" type="text" placeholder="50mm" /></label>
+              <label>光圈<input id="wm-aperture" type="text" placeholder="f/1.8" /></label>
+              <label>快门<input id="wm-shutter" type="text" placeholder="1/400s" /></label>
+              <label>ISO<input id="wm-iso" type="text" placeholder="ISO 400" /></label>
+            </div>
+            <div class="st-form-grid">
+              <label>拍摄时间<input id="wm-date" type="text" placeholder="2026.11.25 16:30" /></label>
+              <label>拍摄地点<input id="wm-location" type="text" placeholder="自动 GPS 或手动填写" /></label>
+              <label class="st-span2">摄影师签名 / 副标题<input id="wm-signature" type="text" placeholder="选填，例如：Photo by Studio" /></label>
+            </div>
+          </div>
+
+          <div class="st-group">
+            <div class="st-group-head"><span>细节开关与比例</span></div>
+            <div class="st-checks">
+              <label><input type="checkbox" id="wm-show-brand" checked /> 品牌标志</label>
+              <label><input type="checkbox" id="wm-show-lens" checked /> 镜头型号</label>
+              <label><input type="checkbox" id="wm-show-date" checked /> 拍摄时间</label>
+              <label><input type="checkbox" id="wm-show-loc" checked /> 地点</label>
+              <label><input type="checkbox" id="wm-show-ev" /> 曝光补偿</label>
+            </div>
+            <label class="st-slider">
+              <span>边框与字号比例 <strong id="wm-scale-val" class="num">100%</strong></span>
+              <input type="range" id="wm-scale" min="65" max="145" step="5" value="100" />
+            </label>
+          </div>
+
+          <div class="st-actions">
+            <button type="button" class="btn primary" id="wm-export-btn" disabled>下载高清带水印成片 (.jpg) <span aria-hidden="true">↓</span></button>
+            <div class="st-actions-row">
+              <button type="button" class="btn ghost hidden" id="wm-batch-zip-btn">批量导出全部水印 (.zip)</button>
+              <button type="button" class="btn ghost" id="wm-send-collage" disabled>发送到拼图工坊 →</button>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <!-- Panel 2: Auto Collage & WeChat Moments 9-Grid Preview -->
+      <section id="st-pane-collage" class="st-pane hidden" role="tabpanel" aria-labelledby="st-tab-collage">
+        <div class="st-stage st-collage-stage">
+          <div class="st-stage-bar">
+            <div class="st-stage-sources">
+              <input id="col-upload-input" type="file" multiple accept=".jpg,.jpeg,.png,.tif,.tiff,.arw,.cr2,.cr3,.nef,.dng,.raf,.orf,.rw2,.pef,.srw,.raw" hidden />
+              <button type="button" class="btn ghost st-sm-btn" id="col-upload-btn">＋ 上传多张照片</button>
+              <button type="button" class="btn ghost st-sm-btn hidden" id="col-load-current">＋ 当前成片</button>
+              <button type="button" class="btn ghost st-sm-btn" id="col-pick-library">从历史 / 批量组图导入</button>
+              <button type="button" class="st-chip-btn" id="col-clear-btn">清空</button>
+            </div>
+            <div class="st-preview-switch" role="group" aria-label="拼图预览方式">
+              <button type="button" id="col-view-moments" class="active" aria-pressed="true">朋友圈九宫格预览</button>
+              <button type="button" id="col-view-canvas" aria-pressed="false">高清拼图成片</button>
+            </div>
+          </div>
+
+          <div class="st-library-drawer hidden" id="col-library-drawer">
+            <div class="st-drawer-head"><strong>点击导入单张作品，或一键导入整组同风格批量成片</strong><button type="button" class="st-chip-btn" id="col-library-close">收起</button></div>
+            <div class="st-library-list" id="col-library-list"></div>
+          </div>
+
+          <div class="st-arrange-bar">
+            <span class="st-arrange-label">智能自动排版</span>
+            <button type="button" class="st-chip-btn" data-arrange="hero_center">✨ 视觉重心居中</button>
+            <button type="button" class="st-chip-btn" data-arrange="color_harmony">🎨 色调顺色排布</button>
+            <button type="button" class="st-chip-btn" data-arrange="chronological">🕒 拍摄时间序</button>
+            <button type="button" class="st-chip-btn" data-arrange="balanced">⚖️ 明暗交错均衡</button>
+            <span id="col-arrange-note" class="st-arrange-note"></span>
+          </div>
+
+          <div class="st-tray" id="col-tray" aria-label="拼图照片排序列表"></div>
+
+          <!-- Dual preview area: WeChat Moments Phone Mockup OR Combined Collage Canvas -->
+          <div class="st-collage-preview-area" id="col-preview-area">
+            <div class="st-empty" id="col-empty">
+              <strong>上传 1–9 张照片，或从 SuperPhoto 成片 / 同风格批量组图一键导入</strong>
+              <p>支持自动视觉排布、单图一键切九宫格、实时预览发朋友圈效果（含浅色/深色微信外观与发图顺序）。</p>
+            </div>
+
+            <!-- Sub-view A: Realistic WeChat Moments Phone Mockup -->
+            <div class="moments-stage hidden" id="moments-stage">
+              <div class="moments-toolbar">
+                <div class="moments-theme-switch" role="group" aria-label="微信主题">
+                  <button type="button" id="moments-light" class="active">微信浅色</button>
+                  <button type="button" id="moments-dark">微信深色</button>
+                </div>
+                <label class="moments-check"><input type="checkbox" id="moments-show-order" checked /> 显示发图顺序 (01–09)</label>
+                <button type="button" class="st-chip-btn" id="moments-gen-caption">✨ 根据 EXIF 生成文案</button>
+                <span class="st-hint-inline">提示：拖动九宫格图片可直接调换位置，点击图片查看大图</span>
+              </div>
+
+              <div class="phone-frame" id="phone-frame" data-theme="light">
+                <div class="phone-notch" aria-hidden="true"><span>9:41</span><span class="phone-pill"></span><span>5G 100%</span></div>
+                <div class="phone-nav"><span>‹</span><strong>朋友圈</strong><span>📷</span></div>
+                <div class="moments-card">
+                  <div class="moments-avatar" aria-hidden="true">SP</div>
+                  <div class="moments-body">
+                    <input id="moments-nick" class="moments-nick" type="text" value="SuperPhoto 摄影日记" aria-label="微信昵称" />
+                    <textarea id="moments-caption" class="moments-caption" rows="2" placeholder="这一刻的想法…"></textarea>
+                    <div class="moments-grid cols-3" id="moments-grid"></div>
+                    <input id="moments-loc" class="moments-loc" type="text" placeholder="添加位置（可选）" aria-label="朋友圈位置" />
+                    <div class="moments-meta">
+                      <span>刚刚</span>
+                      <span class="moments-more" aria-hidden="true">··</span>
+                    </div>
+                    <div class="moments-likes" aria-hidden="true">♡ 摄影好友 A，同行 B，策展人 C 等 18 人</div>
+                  </div>
+                </div>
+                <span class="st-loading hidden" id="moments-loading">正在同步预览…</span>
+              </div>
+            </div>
+
+            <!-- Sub-view B: Combined Collage Image Preview -->
+            <div class="st-canvas hidden" id="col-canvas">
+              <img id="col-preview-img" class="hidden" alt="高清拼图预览" />
+              <span class="st-loading hidden" id="col-loading">正在生成高清拼图…</span>
+            </div>
+          </div>
+        </div>
+
+        <aside class="st-controls">
+          <div class="st-group">
+            <div class="st-group-head"><span>拼图 / 九宫格模板</span><span id="col-count-badge" class="st-hint-inline">0 张照片</span></div>
+            <div class="st-layout-grid" id="col-layout-grid"></div>
+          </div>
+
+          <div class="st-group hidden" id="col-slice-group">
+            <div class="st-group-head"><span>单图切格取景位置</span><button type="button" class="st-link-btn" id="col-slice-reset">居中</button></div>
+            <label class="st-slider">
+              <span>左右偏移 <strong id="col-slice-x-val" class="num">0%</strong></span>
+              <input type="range" id="col-slice-x" min="-100" max="100" step="5" value="0" />
+            </label>
+            <label class="st-slider">
+              <span>上下偏移 <strong id="col-slice-y-val" class="num">0%</strong></span>
+              <input type="range" id="col-slice-y" min="-100" max="100" step="5" value="0" />
+            </label>
+          </div>
+
+          <div class="st-group">
+            <div class="st-group-head"><span>画幅与画布外观</span></div>
+            <label class="st-inline-select">
+              <span>单格构图</span>
+              <select id="col-tile-mode">
+                <option value="cover_square">铺满方格（1:1 满框）</option>
+                <option value="padded_square">留白方框（不裁切原比例）</option>
+                <option value="original">保留各自原比例</option>
+              </select>
+            </label>
+            <div class="st-bg-row">
+              <span class="st-mini-label">底色</span>
+              <div class="st-swatches" id="col-bg-swatches">
+                <button type="button" data-bg="white" class="active" title="纯白"><span class="sw sw-white"></span>纯白</button>
+                <button type="button" data-bg="dark" title="暗房黑"><span class="sw sw-dark"></span>暗黑</button>
+                <button type="button" data-bg="ivory" title="暖象牙纸"><span class="sw sw-ivory"></span>象牙</button>
+                <button type="button" data-bg="blur" title="氛围模糊"><span class="sw sw-blur"></span>模糊</button>
+              </div>
+            </div>
+            <label class="st-slider">
+              <span>图片间距 <strong id="col-gap-val" class="num">14px</strong></span>
+              <input type="range" id="col-gap" min="0" max="60" step="2" value="14" />
+            </label>
+            <label class="st-slider">
+              <span>外框留白 <strong id="col-pad-val" class="num">28px</strong></span>
+              <input type="range" id="col-pad" min="0" max="100" step="4" value="28" />
+            </label>
+            <label class="st-slider">
+              <span>圆角 <strong id="col-rad-val" class="num">6px</strong></span>
+              <input type="range" id="col-rad" min="0" max="40" step="2" value="6" />
+            </label>
+          </div>
+
+          <div class="st-group">
+            <div class="st-group-head"><span>EXIF 参数水印联动</span></div>
+            <div class="st-checks st-checks-col">
+              <label><input type="checkbox" id="col-tile-wm" /> 每张图自动叠加各自 EXIF 水印</label>
+              <label class="st-inline-select hidden" id="col-wm-style-wrap">
+                <span>水印样式</span>
+                <select id="col-wm-style">
+                  <option value="leica_bar">经典白栏</option>
+                  <option value="dark_bar">暗夜黑栏</option>
+                  <option value="gallery_frame">画廊白框</option>
+                  <option value="blur_card">氛围毛玻璃</option>
+                  <option value="film_polaroid">胶片拍立得</option>
+                  <option value="corner_overlay">极简角标</option>
+                </select>
+              </label>
+              <label><input type="checkbox" id="col-show-footer" /> 合并拼图底部显示 EXIF 总铭牌</label>
+            </div>
+            <div class="st-form-grid hidden" id="col-footer-fields">
+              <label>主标题<input id="col-footer-title" type="text" placeholder="留空自动读取机型" /></label>
+              <label>副标题<input id="col-footer-sub" type="text" placeholder="留空自动读取镜头与日期" /></label>
+            </div>
+          </div>
+
+          <div class="st-actions">
+            <button type="button" class="btn primary" id="col-export-zip" disabled>下载朋友圈九宫格切图包 (.zip) <span aria-hidden="true">↓</span></button>
+            <button type="button" class="btn ghost" id="col-export-jpg" disabled>下载高清合并拼图 (.jpg) <span aria-hidden="true">↓</span></button>
+          </div>
+        </aside>
+      </section>
+
+      <!-- Moments Lightbox for inspecting any clicked tile -->
+      <div class="st-lightbox hidden" id="st-lightbox" role="dialog" aria-modal="true" aria-label="大图预览">
+        <button type="button" class="st-lb-close" id="st-lb-close" aria-label="关闭大图">✕</button>
+        <button type="button" class="st-lb-nav prev" id="st-lb-prev" aria-label="上一张">‹</button>
+        <figure class="st-lb-fig">
+          <img id="st-lb-img" alt="朋友圈大图预览" />
+          <figcaption id="st-lb-cap"></figcaption>
+        </figure>
+        <button type="button" class="st-lb-nav next" id="st-lb-next" aria-label="下一张">›</button>
+      </div>
+    </dialog>
 
     <script src="./app.js?v=25"></script>
+    <script src="./studio.js?v=25"></script>
   </body>
 </html>

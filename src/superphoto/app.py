@@ -51,6 +51,7 @@ from . import full_export, style_sync
 from .models import BatchFullExportIn, FeedbackIn, FullExportIn, RatingIn, RefinementIn
 from .vision import get_vision_status
 from .vault_routes import build_router as build_vault_router, publish_bridge, retract_bridge
+from .studio_routes import build_router as build_studio_router
 from .pipeline import run_job
 from .preference import describe_taste
 from .recipes import LOOKS
@@ -226,6 +227,7 @@ def _c() -> sqlite3.Connection:
 
 
 app.include_router(build_vault_router(_s))
+app.include_router(build_studio_router(_s, _c))
 
 
 @app.get("/api/health")

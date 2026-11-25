@@ -36,6 +36,31 @@ def main(argv: list[str] | None = None) -> None:
     sync.add_argument("--no-wb-match", action="store_true", help="disable automatic inter-shot WB alignment")
     sync.add_argument("--full-size", action="store_true", help="render at native full resolution")
 
+    wm = sub.add_parser("watermark", help="add an EXIF camera-parameter watermark frame to a photo")
+    wm.add_argument("photo", type=Path)
+    wm.add_argument("--out", type=Path, required=True, help="output JPEG path")
+    wm.add_argument(
+        "--style",
+        choices=("leica_bar", "dark_bar", "gallery_frame", "blur_card", "film_polaroid", "corner_overlay"),
+        default="leica_bar",
+    )
+    wm.add_argument("--location", default=None)
+    wm.add_argument("--signature", default=None)
+    wm.add_argument("--max-edge", type=int, default=0)
+
+    col = sub.add_parser("collage", help="auto-arrange and stitch photos into a collage or Moments 9-grid")
+    col.add_argument("photos", nargs="+", type=Path)
+    col.add_argument("--out", type=Path, required=True, help="output JPEG or .zip path")
+    col.add_argument(
+        "--layout",
+        choices=("grid_9", "grid_4", "grid_6", "triptych", "editorial", "vertical_story", "slice_9", "slice_4", "slice_6"),
+        default="grid_9",
+    )
+    col.add_argument("--arrange", choices=("none", "hero_center", "color_harmony", "chronological", "balanced"), default="hero_center")
+    col.add_argument("--background", default="white")
+    col.add_argument("--watermark", action="store_true", help="apply EXIF watermark to each tile")
+    col.add_argument("--moments-zip", action="store_true", help="export numbered 01..09 Moments tiles as a ZIP")
+
     imports = sub.add_parser("import-folder", help="submit stable photos to the running server")
     imports.add_argument("folder", type=Path)
     imports.add_argument("--watch", action="store_true")
@@ -85,6 +110,10 @@ def main(argv: list[str] | None = None) -> None:
         _process(args.photo, args.out)
     elif args.cmd == "sync-style":
         _sync_style(args)
+    elif args.cmd == "watermark":
+        _watermark_cli(args)
+    elif args.cmd == "collage":
+        _collage_cli(args)
     elif args.cmd == "import-folder":
         if not 0 <= args.stable_seconds <= 60 or not 0 < args.interval <= 60:
             parser.error("stable-seconds must be 0..60; interval must be >0 and <=60")
@@ -208,6 +237,69 @@ def _sync_style(args: argparse.Namespace) -> None:
         print(json.dumps(record, ensure_ascii=False), flush=True)
     shutil.rmtree(work_root, ignore_errors=True)
     print(json.dumps({"total": len(summary), "out_dir": str(out_dir)}, ensure_ascii=False, indent=2))
+
+
+def _watermark_cli(args: argparse.Namespace) -> None:
+    from PIL import Image
+
+    from . import watermark
+
+    photo = Path(args.photo)
+    if not photo.is_file():
+        raise SystemExit(f"not a file: {photo}")
+    meta = watermark.extract_photo_metadata(photo)
+    cfg = watermark.WatermarkConfig(
+        style=args.style,
+        location=args.location,
+        signature=args.signature,
+    )
+    with Image.open(photo) as im:
+        rendered = watermark.render_watermark(im, meta, cfg, max_edge=args.max_edge)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(watermark.encode_jpeg_bytes(rendered, quality=95))
+    print(json.dumps({"output": str(out), "size": list(rendered.size), "exif": meta}, ensure_ascii=False, indent=2))
+
+
+def _collage_cli(args: argparse.Namespace) -> None:
+    from PIL import Image
+
+    from . import collage, watermark
+
+    paths = [Path(p) for p in args.photos if Path(p).is_file()]
+    if not paths:
+        raise SystemExit("未找到可拼图的照片文件")
+    records = []
+    for idx, p in enumerate(paths):
+        meta = watermark.extract_photo_metadata(p)
+        with Image.open(p) as im:
+            rgb = im.convert("RGB")
+            aes = collage.analyze_tile_aesthetics(rgb, meta)
+        records.append({"id": str(idx), "path": p, "metadata": meta, "aesthetics": aes})
+    if args.arrange != "none" and len(records) > 1:
+        order, reason = collage.auto_arrange_items(records, mode=args.arrange)
+        by_id = {r["id"]: r for r in records}
+        records = [by_id[i] for i in order]
+    else:
+        reason = "保持输入顺序"
+
+    images = [Image.open(r["path"]).convert("RGB") for r in records]
+    metas = [r["metadata"] for r in records]
+    cfg = collage.CollageConfig(
+        layout=args.layout,
+        background=args.background,
+        tile_watermark=args.watermark,
+    )
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if args.moments_zip or out.suffix.lower() == ".zip":
+        data = collage.export_moments_zip_bytes(images, metas, cfg)
+        out.write_bytes(data)
+        print(json.dumps({"output": str(out), "mode": "moments_zip", "arrange": reason}, ensure_ascii=False, indent=2))
+    else:
+        rendered = collage.render_collage(images, metas, cfg, target_width=2400)
+        out.write_bytes(watermark.encode_jpeg_bytes(rendered, quality=95))
+        print(json.dumps({"output": str(out), "size": list(rendered.size), "arrange": reason}, ensure_ascii=False, indent=2))
 
 
 def _vision_check(settings, *, list_models: bool = False) -> dict[str, Any]:

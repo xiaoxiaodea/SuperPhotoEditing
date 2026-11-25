@@ -123,6 +123,12 @@ function bind() {
       <button type="button" class="btn ghost" id="sync-open"><span>批量套用到同组照片</span><span aria-hidden="true">↗</span></button>
       <p class="feedback-hint" id="sync-entry-hint">把当前成片的色调与氛围统一到同一批拍摄的其他 RAW / JPG / PNG，每张自动适配曝光与冷暖。</p>
     </div>
+    <div class="studio-entry" id="studio-entry">
+      <span class="version-label">EXIF 水印与朋友圈拼图</span>
+      <div class="studio-entry-btns">
+        <button type="button" class="btn ghost" id="wm-open-current">制作 EXIF 水印</button>
+        <button type="button" class="btn ghost" id="collage-open-current">拼图 · 九宫格预览</button>
+      </div>
       <p class="feedback-hint">自动提取原片机型、光圈、快门与 ISO 生成摄影水印，或拼图预览朋友圈九宫格。</p>
     </div>
     <div class="refine-section">
