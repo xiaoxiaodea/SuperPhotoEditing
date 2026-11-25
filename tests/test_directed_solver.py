@@ -140,6 +140,22 @@ def test_look_saturation_is_kept_under_the_solved_value(monkeypatch):
     assert abs(free["chroma"]["after"] - base) < 0.01 and "look_room" not in free["chroma"]
 
 
+def test_a_profile_keeps_its_colour_like_a_look():
+    base = tone.chroma_mean(tone.load_small(_renderer({})([], 0.0, {}, 0.0)))
+    # A muted profile under a target that asks for the photo's own colour: the solver would cancel the profile
+    # with saturation; it only nudges within the look room, and the profile stays in the document.
+    plan, _ = directed.sanitize_plan({"title": "t", "tone": {"chroma": base * 1.5},
+                                      "profile": {"id": "lc.muted.bleached", "amount": 60}}, slot="B")
+    _, document, _, report = directed.solve_plan(plan, "jpeg", _document_render({}))
+    assert document["profile"] == {"id": "lc.muted.bleached", "amount": 60.0}
+    assert document["color"]["saturation"] <= directed.LOOK_SATURATION_ROOM + 0.5
+    assert report["chroma"]["look_room"] == directed.LOOK_SATURATION_ROOM
+    free, _ = directed.sanitize_plan({"title": "t", "tone": {"chroma": base * 1.5}}, slot="B")
+    _, free_document, _, free_report = directed.solve_plan(free, "jpeg", _document_render({}))
+    assert free_document["color"]["saturation"] > directed.LOOK_SATURATION_ROOM + 5.0
+    assert "look_room" not in free_report["chroma"]
+
+
 def test_a_raw_negative_under_a_look_may_still_be_developed_in_colour(monkeypatch):
     monkeypatch.setitem(directed.LOOKS, "test_look", {"title": "t", "use": "u",
                                                       "develop": {"color": {"saturation": -20}}})

@@ -221,6 +221,46 @@ LOOKS: dict[str, dict[str, Any]] = {
 }
 
 
+# LightCraft's built-in colour profiles (`profiles.list`, 0.21.1), offered as "profile": {"id", "amount"} under a
+# version's own edit. In the develop document a profile is one key, {"profile": {"id", "amount" 0..200}}; a cold
+# render, develop.merge and develop.profile give the same pixels (probe 2026-11-24). Portrait is left out (it
+# barely changes a picture: 0.9 at amount 100), as are the monochrome and B&W ones.
+# "use" is what each did on its own to ten unedited photos (the three JPEG dev photos and the seven reference
+# RAWs, .task-cache/probe-looks-2026-11-24/out/effects.log), at amount 100: Lab shift, colourfulness ratio and
+# the black point it lifts. The solver still places the tones, so a matte profile's black goes where the plan's
+# target says.
+PROFILES: dict[str, dict[str, str]] = {
+    "lc.vivid": {"title": "鲜艳", "use": "richer colour everywhere (x1.25), blues a little deeper; no hue cast"},
+    "lc.landscape": {"title": "风光", "use": "richer blue sky and green foliage (x1.14), a slightly cooler frame"},
+    "lc.neutral": {"title": "中性", "use": "flatter, a little less colour (x0.90), softer whites; a quiet base"},
+    "lc.film.warm-print": {"title": "胶片 · 暖调相纸", "use": "a warm yellow print cast, slightly less colour (x0.90),"
+                           " a trace of lifted black"},
+    "lc.film.cool-fade": {"title": "胶片 · 冷调褪色", "use": "faded cool film: lifted black, held white, green-cyan"
+                          " lean, much less colour (x0.77)"},
+    "lc.film.golden-hour": {"title": "胶片 · 金色时刻", "use": "strong golden warmth over the whole frame, richer"
+                            " colour (x1.26)"},
+    "lc.film.faded-slide": {"title": "胶片 · 褪色反转片", "use": "a blue slide-film cast, colour a little richer (x1.15)"},
+    "lc.cine.teal-amber": {"title": "电影 · 青橙", "use": "amber warm tones against teal cool ones, colourfulness about"
+                           " unchanged (x0.95)"},
+    "lc.cine.night-blue": {"title": "电影 · 夜蓝", "use": "a cold blue cast, slightly darker, less colour (x0.86)"},
+    "lc.cine.desert-heat": {"title": "电影 · 沙漠热浪", "use": "the strongest: an orange-red heat over the whole frame,"
+                            " richer (x1.17); changes a picture about twice as much as the others"},
+    "lc.cine.neon-dusk": {"title": "电影 · 霓虹黄昏", "use": "a magenta-violet lean, richer (x1.14)"},
+    "lc.muted.matte-soft": {"title": "低饱 · 柔和哑光", "use": "a soft matte: lifted black, much less colour (x0.75)"},
+    "lc.muted.bleached": {"title": "低饱 · 漂白", "use": "bleach bypass: colour drained (x0.62), crisp whites"},
+    "lc.muted.pastel-haze": {"title": "低饱 · 粉彩薄雾", "use": "a bright haze: lifted black and mids, less colour"
+                             " (x0.76)"},
+    "lc.muted.quiet-green": {"title": "低饱 · 静谧绿", "use": "lighter and a little muted (x0.86), a small change"},
+}
+
+
+def profile_lines(notes: dict[str, str] | None = None) -> list[str]:
+    """One line per profile for a planning prompt, followed by ``notes[profile_id]`` where given."""
+    notes = notes or {}
+    return [f"{profile_id} ({spec['title']}): {spec['use']}" + (f" {notes[profile_id]}" if profile_id in notes else "")
+            for profile_id, spec in PROFILES.items()]
+
+
 def _tone_hint(shifts: dict[str, float]) -> str:
     """The family's black and white handling as a suggestion; the plan's tone targets decide."""
     parts = [f"{name} {value:+.2f}" for name, value in shifts.items() if abs(value) >= 0.005]

@@ -51,7 +51,7 @@ from . import experience
 from .db import SLOT_LETTERS
 from .experience import DRAMATIC_ROLE, NATURAL_ROLE, PALETTE_ROLE
 from .lightcraft import RELATIVE_WB_MODE
-from .looks import LOOKS, look_lines
+from .looks import LOOKS, PROFILES, look_lines, profile_lines
 from .vision import VisionUnavailable, chat_vision, is_temporary, probe, provider_from, safe_error
 
 ENGINE = "lightcraft-directed"
@@ -130,6 +130,25 @@ RAW_LOOK_SATURATION_UP = 45.0
 # Distance grows about in proportion to strength (0.6 gives 0.58-0.77 of it on the three old dev photos).
 LOOK_PROBE_STRENGTH = 1.0
 LOOK_PROBE_WORKERS = 4
+# A version other than A may sit on one of LightCraft's colour profiles (looks.PROFILES), at an amount in
+# PROFILE_AMOUNTS. It is a style knob for the variants, not a way to get closer to a natural finish
+# (.task-cache/probe-looks-2026-11-24, scored against the photographer's finished edits of ref-r13):
+# - Laid under the 21 delivered edits without re-solving (replay_profiles.py), a profile that matched the scene
+#   looked useful: desert-heat or golden-hour at 50 on the dunes about -1.3 grid, cool-fade on snow -0.4..-0.6,
+#   while desert-heat at 100 on snow went +5.7. Amount 50 beat 100 on most of them.
+# - With the 14 B/C plans solved again (resolve_profiles.py), the solver held each plan's colour targets and
+#   none of that survived. Against the same plan solved without a profile (grid 11.43): cool-fade -0.12 on
+#   average (snow -0.21), vivid +0.15, desert-heat +0.42 (dunes +0.17), teal-amber +0.59, golden-hour +0.79,
+#   and on snow the warm ones +0.75..+1.28.
+# - Per photo it swung -2.9..+4.7, and not by scene family. desert-heat helped DSC05749 and the snowy DSC02262 by
+#   1.7-2.9 but hurt the aerial dunes and DSC02270 by 1.9-4.7. cool-fade helped the aerial dunes by 2-2.6.
+# - Writing tone.chroma at what the profile gives on the photo (--scale-chroma) moved desert-heat on the dunes
+#   from +0.58 to +0.17 and golden-hour from +0.57 to +0.41, so the prompt asks for it. Where global saturation
+#   had already reached its 55 cap, it changed nothing.
+PROFILE_AMOUNTS = (20.0, 100.0)
+PROFILE_DEFAULT_AMOUNT = 50.0
+PROFILE_PROBE_AMOUNT = 50.0
+PROFILE_KEY = "profile:"     # measure_looks keys a profile's numbers as "profile:<id>" beside the looks'
 # The darkest vignette a planned version gets (a user's refinement is not held). In p4-r1 every round with
 # -15 or more lost points for it: uneven light on uniform sand, dead corners on a dark lower half.
 VIGNETTE_FLOOR = {slot: -10.0 if slot == "A" else -14.0 for slot in SLOT_LETTERS}
@@ -417,6 +436,30 @@ def _look(raw: Any, path: str, notes: list[str]) -> dict[str, Any] | None:
     return {"id": look_id, "strength": round(min(1.0, max(0.2, strength)), 3)}
 
 
+def _profile(raw: Any, slot: str, notes: list[str]) -> dict[str, Any] | None:
+    """A LightCraft colour profile under the version ({"id", "amount"}); A, the natural version, takes none."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = {"id": raw}
+    if not isinstance(raw, dict):
+        notes.append(f"{slot}.profile: 不是对象，已忽略")
+        return None
+    profile_id = str(raw.get("id") or "").strip()
+    if profile_id in {"", "none", "null", "lc.color"}:
+        return None
+    if profile_id not in PROFILES:
+        notes.append(f"{slot}.profile: 没有名为 {profile_id!r} 的底片风格，已忽略")
+        return None
+    if slot == "A":
+        notes.append(f"A.profile: A 是自然版本，不用底片风格（{PROFILES[profile_id]['title']}），已忽略")
+        return None
+    amount = _number(raw.get("amount"))
+    amount = PROFILE_DEFAULT_AMOUNT if amount is None else (amount * 100.0 if amount <= 1.5 else amount)
+    lo, hi = PROFILE_AMOUNTS
+    return {"id": profile_id, "amount": round(min(hi, max(lo, amount)), 1)}
+
+
 def sanitize_plan(raw: Any, *, slot: str) -> tuple[dict[str, Any], list[str]]:
     """Return a plan restricted to supported controls and safe ranges, plus notes."""
     if not isinstance(raw, dict):
@@ -493,11 +536,15 @@ def sanitize_plan(raw: Any, *, slot: str) -> tuple[dict[str, Any], list[str]]:
     look = _look(raw.get("look"), slot, notes)
     if look is not None:
         plan["look"] = look
+    profile = _profile(raw.get("profile"), slot, notes)
+    if profile is not None:
+        plan["profile"] = profile
     return plan, notes
 
 
 def is_executable(plan: dict[str, Any]) -> bool:
-    return bool(plan.get("develop") or plan.get("masks") or plan.get("tone") or plan.get("look"))
+    return bool(plan.get("develop") or plan.get("masks") or plan.get("tone") or plan.get("look")
+                or plan.get("profile"))
 
 
 # --------------------------------------------------------------------------
@@ -627,6 +674,9 @@ def compile_document(plan: dict[str, Any], source_kind: str, *,
                   "grain"):
         if develop.get(group):
             document[group] = copy.deepcopy(develop[group])
+    profile = plan.get("profile") or {}
+    if profile.get("id") in PROFILES:
+        document["profile"] = {"id": profile["id"], "amount": float(profile.get("amount", PROFILE_DEFAULT_AMOUNT))}
     if curve:
         section = document.setdefault("curve", {})
         section["master"] = [[float(x), float(y)] for x, y in curve]
@@ -929,7 +979,9 @@ def solve_plan(plan: dict[str, Any], source_kind: str, render: Callable[[dict[st
     develop = plan.get("develop") or {}
     start_saturation = float((_merged_develop(plan).get("color") or {}).get("saturation", 0.0))
     saturation_range = RAW_SOLVER_SATURATION_RANGE if source_kind == "raw" else SOLVER_SATURATION_RANGE
-    with_look = (plan.get("look") or {}).get("id") in LOOKS
+    # A profile is the version's colour as much as a look is: held to a "natural" chroma target, the solver would
+    # take back what a richer profile adds (or put back what a muted one takes away).
+    with_look = (plan.get("look") or {}).get("id") in LOOKS or (plan.get("profile") or {}).get("id") in PROFILES
     look_up = RAW_LOOK_SATURATION_UP if source_kind == "raw" else LOOK_SATURATION_ROOM
     if with_look:
         saturation_range = (min(start_saturation, max(saturation_range[0], start_saturation - LOOK_SATURATION_ROOM)),
@@ -974,6 +1026,9 @@ def describe_plan(plan: dict[str, Any]) -> list[str]:
     look = plan.get("look") or {}
     if look.get("id") in LOOKS:
         lines.append(f"风格：{LOOKS[look['id']]['title']}（强度 {look.get('strength', 0.8) * 100:.0f}%）")
+    profile = plan.get("profile") or {}
+    if profile.get("id") in PROFILES:
+        lines.append(f"底片风格：{PROFILES[profile['id']]['title']}（{profile.get('amount', PROFILE_DEFAULT_AMOUNT):.0f}%）")
     for mask in plan.get("masks") or []:
         kinds = [_KIND_LABELS.get(mask["shape"]["kind"], "蒙版")]
         if mask.get("limit"):
@@ -1438,11 +1493,15 @@ def measure_looks(binary: Path, original: Path, folder: Path, source_kind: str) 
     colourfulness as a ratio (left out on a frame with no colour to speak of), and "distance", the mean Lab
     difference (``lightroom_qa.render_distance``, the measure that calls sibling versions nearly identical).
 
+    Every profile in looks.PROFILES is measured the same way at PROFILE_PROBE_AMOUNT, under the key
+    "profile:<id>", with its mean Lab shift as well ("a" green-/magenta+, "b" blue-/yellow+): a profile is
+    chosen for its cast as much as for its colourfulness.
+
     Rendered on a copy of the photo in ``folder``; a look whose render fails is left out, and an empty dict
     means no numbers (planning goes on without them).
     """
     from .lightcraft import LightCraftError, render_document, render_session
-    from .lightroom_qa import render_distance
+    from .lightroom_qa import colour_shift, render_distance
 
     folder.mkdir(parents=True, exist_ok=True)
     source = folder / f"source{original.suffix.lower()}"
@@ -1451,12 +1510,14 @@ def measure_looks(binary: Path, original: Path, folder: Path, source_kind: str) 
     def one(name: str, plan: dict[str, Any]) -> tuple[str, Path | None]:
         document, _ = compile_document(plan, source_kind)
         try:
-            return name, render_document(binary, source, document, folder / name, edge=PROBE_EDGE)
+            return name, render_document(binary, source, document, folder / name.replace(":", "-"), edge=PROBE_EDGE)
         except (LightCraftError, OSError):
             return name, None
 
     jobs = [("unedited", {})] + [(look_id, {"look": {"id": look_id, "strength": LOOK_PROBE_STRENGTH}})
                                  for look_id in LOOKS]
+    jobs += [(PROFILE_KEY + profile_id, {"profile": {"id": profile_id, "amount": PROFILE_PROBE_AMOUNT}})
+             for profile_id in PROFILES]
     # One session renders them in turn (the pool's threads queue on it); without one, they render cold in parallel.
     with render_session(binary, source), ThreadPoolExecutor(max_workers=LOOK_PROBE_WORKERS) as pool:
         renders = dict(pool.map(lambda item: one(*item), jobs))
@@ -1475,6 +1536,8 @@ def measure_looks(binary: Path, original: Path, folder: Path, source_kind: str) 
             entry = {"distance": round(render_distance(plain, path), 2)}
             if base >= 0.5:   # x100; a grey frame gives no ratio worth reading
                 entry["chroma"] = round(_frame_chroma(picture_stats(path)) / base, 3)
+            if look_id.startswith(PROFILE_KEY):
+                entry.update(colour_shift(plain, path))
         except (OSError, ValueError):
             continue
         measured[look_id] = entry
@@ -1655,7 +1718,7 @@ _LESSONS = """Lessons from the reference tutorials and from earlier tests on thi
 
 _PLAN_SHAPE = """{"title": "...", "intent": "...", "tone": {"black": .., "shadows": .., "mid": .., "highlights": ..,
  "white": .., "chroma": ..}, "develop": {"light": {...}, ...}, "look": {"id": "...", "strength": 0.8} or null,
- "masks": [{"name": "sky", "purpose": "...", "shape": {...}, "limit": {...}, "adjust": {...}, "target": {...}}]}"""
+ "profile": {"id": "...", "amount": 50} or null, "masks": [{"name": "sky", "purpose": "...", "shape": {...}, "limit": {...}, "adjust": {...}, "target": {...}}]}"""
 
 
 def _look_note(entry: dict[str, float], image: float | None) -> str:
@@ -1705,7 +1768,51 @@ def _looks_block(measured: dict[str, dict[str, float]] | None = None, image_chro
                  f" A's, so a look below {min_distance:g} does not by itself make C visibly different from A: then"
                  " give C its own white balance, grading, calibration or colour targets on the large areas as well,"
                  " or choose a look with a larger number that suits the scene.")
-    return text + "\n" + "\n".join(f"- {line}" for line in lines)
+    return text + "\n" + "\n".join(f"- {line}" for line in lines) + _profiles_block(measured, image_chroma, source_kind)
+
+
+def _profile_note(entry: dict[str, float], image: float | None) -> str:
+    """What one profile measured on this photo at PROFILE_PROBE_AMOUNT: colourfulness, cast and distance."""
+    parts = []
+    ratio = entry.get("chroma")
+    if ratio is not None and image:
+        parts.append(f"frame colourfulness {ratio * image:.1f} = x{ratio:.2f} image 1")
+    cast = []
+    for key, plus, minus in (("b", "yellow", "blue"), ("a", "magenta", "green")):
+        value = entry.get(key)
+        if value is not None and abs(value) >= 0.3:
+            cast.append(f"{plus if value > 0 else minus} {abs(value):.1f}")
+    if cast:
+        parts.append("cast " + ", ".join(cast) + " (mean Lab)")
+    if entry.get("distance") is not None:
+        parts.append(f"changes the picture by {entry['distance']:.1f}")
+    return f"[on this photo at amount {PROFILE_PROBE_AMOUNT:g}: {'; '.join(parts)}]" if parts else ""
+
+
+def _profiles_block(measured: dict[str, dict[str, float]] | None, image_chroma: float | None,
+                    source_kind: str = "jpeg") -> str:
+    """LightCraft's colour profiles for a prompt, with what each measured on this photo (measure_looks)."""
+    notes = {key.removeprefix(PROFILE_KEY): note for key, entry in (measured or {}).items()
+             if key.startswith(PROFILE_KEY) and (note := _profile_note(entry, image_chroma))}
+    lo, hi = PROFILE_AMOUNTS
+    text = ("\nPROFILES: LightCraft's built-in film and cinema colour renderings, applied under everything else in a"
+            f" version: \"profile\": {{\"id\": .., \"amount\": {lo:g}..{hi:g}}} or null. Never on A, which stays natural."
+            " A profile gives a version its colour and cast; the solver still places your tone targets (a matte"
+            " profile's black goes where your black target says). It is a style choice for a version meant to look"
+            " filmic or cinematic, not a correction. Solved against the photographer's finished edits, no profile"
+            " brought an edit closer on average, so put one on at most one or two versions, never on all of them."
+            " It can carry a colour version on its own or sit under a look whose cast agrees with it. Choose it by"
+            " what it measured here (the cast and colourfulness listed with it), not by the scene's name: the same"
+            " profile moved one desert or snow frame closer and another as far away, and on average a warm cast on"
+            " snow (desert-heat, golden-hour) did the most harm. 40-60 usually did better than 100. With a profile"
+            " the solver moves global saturation as it does with a look"
+            + (f" (at most {LOOK_SATURATION_ROOM:g} down and {RAW_LOOK_SATURATION_UP:g} up on this RAW)" if source_kind == "raw"
+               else f" (at most {LOOK_SATURATION_ROOM:g} either way)")
+            + ", so write the version's chroma at what the profile gives at your amount.")
+    if notes:
+        text += (f" \"on this photo\" was MEASURED at amount {PROFILE_PROBE_AMOUNT:g}; the cast and the distance about"
+                 " double at 100, and the colourfulness ratio moves in proportion.")
+    return text + "\n" + "\n".join(f"- {line}" for line in profile_lines(notes))
 
 
 def _source_note(source_kind: str) -> str:
@@ -1819,10 +1926,25 @@ def _measurements(technical: Any) -> dict[str, Any]:
             "top_third_blue", "skin_fraction", "green_fraction")
     data = technical.model_dump() if hasattr(technical, "model_dump") else dict(technical or {})
     out = {key: (round(value, 4) if isinstance(value, float) else value) for key in keys if (value := data.get(key)) is not None}
-    iso = (data.get("exif") or {}).get("EXIF ISOSpeedRatings")
+    iso = _exif_iso(data.get("exif") or {})
     if iso:
         out["iso"] = iso
     return out
+
+
+def _exif_iso(exif: dict[str, Any]) -> int | None:
+    """The ISO from ingest.read_exif's keys (its "EXIF " prefix is already gone), None when there is none."""
+    for key in ("ISOSpeedRatings", "PhotographicSensitivity", "ISO"):
+        raw = exif.get(key)
+        if not raw:
+            continue
+        try:   # exifread gives "100" or "[100, 0]"; Pillow may give "100" or "100/1"
+            value = float(str(raw).strip("[]").split(",")[0].split("/")[0].split()[0])
+        except (ValueError, IndexError):
+            continue
+        if value > 0:
+            return int(round(value))
+    return None
 
 
 def _anchor_text(anchors: dict[str, float]) -> str:

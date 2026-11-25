@@ -291,7 +291,7 @@ def samples(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             "picture": (sidecar.get("experience") or {}).get("picture"),
             "anchor": (anchor.get("experience") or {}).get("picture"),
             "plan": {"title": plan.get("title"), "intent": plan.get("intent"), "tone": plan.get("tone") or {},
-                     "look": plan.get("look")}})
+                     "look": plan.get("look"), "profile": plan.get("profile")}})
     return found
 
 
@@ -432,6 +432,9 @@ def experience_block(conn: sqlite3.Connection, current: dict[str, Any],
             plan = item["plan"]
             look = plan.get("look") or {}
             look_text = f", look {look.get('id')} {look.get('strength', '')}".rstrip() if look.get("id") else ""
+            profile = plan.get("profile") or {}
+            if profile.get("id"):
+                look_text += f", profile {profile['id']} {profile.get('amount', '')}".rstrip()
             lines.append(f"- [{item['similarity']:.2f}] {plan.get('title') or item['direction']} ({item['direction']}):"
                          f" {plan.get('intent') or ''} (tone {_tone_text(plan.get('tone') or {})}{look_text})")
     lines.append("Use this when choosing the directions: give a favoured direction a version when this picture's"

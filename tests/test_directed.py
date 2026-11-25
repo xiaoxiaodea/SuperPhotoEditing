@@ -86,7 +86,7 @@ def _fake_render(calls: list):
         destination.mkdir(parents=True, exist_ok=True)
         (destination / "develop.json").write_text(json.dumps(document), encoding="utf-8")
         exposure = document.get("light", {}).get("exposure", 0.0)
-        tint = (1.08, 1.0, 0.9) if document.get("grading") else (1.0, 1.0, 1.0)
+        tint = (1.08, 1.0, 0.9) if document.get("grading") or document.get("profile") else (1.0, 1.0, 1.0)
         output = _jpeg(destination / "render.jpg", scale=2 ** exposure, tint=tint)
         with lock:
             calls.append((destination, document))
@@ -242,6 +242,19 @@ def test_sanitize_plan_rejects_non_object_and_degenerate_shapes():
     assert plan["masks"] == [] and plan["develop"] == {}
     assert plan["title"] == directed.DEFAULT_TITLES["B"]
     assert len(notes) == 3
+
+
+def test_measurements_carry_the_iso_as_read_exif_stores_it():
+    # read_exif drops exifread's "EXIF " prefix; the planner used to look for the prefixed key and never saw an ISO.
+    base = {"source_kind": "raw", "width": 6000, "height": 4000}
+    assert directed._measurements({**base, "exif": {"ISOSpeedRatings": "3200"}})["iso"] == 3200
+    assert directed._measurements({**base, "exif": {"ISOSpeedRatings": "[800, 0]"}})["iso"] == 800
+    assert directed._measurements({**base, "exif": {"PhotographicSensitivity": "100/1"}})["iso"] == 100
+    assert "iso" not in directed._measurements({**base, "exif": {"ISOSpeedRatings": "0"}})
+    assert "iso" not in directed._measurements(base)
+    technical = SimpleNamespace(model_dump=lambda: {**base, "exif": {"ISOSpeedRatings": "6400"}})
+    prompt = directed.plan_prompt(technical, (6000, 4000))
+    assert '"iso": 6400' in prompt
 
 
 def test_compile_document_shifts_white_balance_from_the_files_own_reference():
@@ -433,12 +446,17 @@ def test_plans_shown_to_the_model_give_chroma_on_the_x100_scale_the_prompt_asks_
 
 def test_looks_are_measured_on_the_photo_and_given_to_planner_and_reviewer(job, monkeypatch):
     looks = directed.measure_looks(Path("lightcraft-cli"), job.original, job.root / "directed" / "looks", "jpeg")
-    assert set(looks) == set(directed.LOOKS)
+    profiles = {key: entry for key, entry in looks.items() if key.startswith(directed.PROFILE_KEY)}
+    assert set(looks) - set(profiles) == set(directed.LOOKS)
+    assert {key.removeprefix(directed.PROFILE_KEY) for key in profiles} == set(directed.PROFILES)
     assert all(entry["chroma"] > 0 and entry["distance"] > 0 for entry in looks.values())
     probes = {destination.name: document for destination, document in job.renders}
     assert probes["unedited"] == {} and probes["desert_gold"]["grading"]   # strength 1.0 of each look
-    # The fake renderer warms every graded document alike (every look grades): one ratio, away from 1.
+    assert probes["profile-lc.film.cool-fade"] == {"profile": {"id": "lc.film.cool-fade", "amount": 50.0}}
+    # The fake renderer warms every graded document and every profile alike: one ratio, away from 1.
     assert len({entry["chroma"] for entry in looks.values()}) == 1 and looks["desert_gold"]["chroma"] != 1.0
+    # A profile's cast is measured too (the fake one is warm: yellow, b > 0); a look's is not.
+    assert all(entry["b"] > 0.5 and "a" in entry for entry in profiles.values()) and "b" not in looks["desert_gold"]
     assert (job.root / "directed" / "looks" / "source.jpg").is_file()   # rendered on a copy
 
     block = directed._looks_block({"desert_gold": {"chroma": 1.31, "distance": 3.8},
@@ -460,7 +478,44 @@ def test_looks_are_measured_on_the_photo_and_given_to_planner_and_reviewer(job, 
     reviews = [p for p in vision.prompts if "reviewing version" in p]
     assert "on this photo at strength 1.0" in plan_prompt and all("on this photo at strength 1.0" in p for p in reviews)
     saved = json.loads((job.root / "directed" / "plan.json").read_text(encoding="utf-8"))
-    assert set(saved["looks"]) == set(directed.LOOKS)
+    assert set(saved["looks"]) == set(looks)
+    assert "PROFILES:" in plan_prompt and "[on this photo at amount 50:" in plan_prompt
+
+
+def test_a_profile_sits_under_any_version_but_the_natural_a():
+    raw = {"title": "t", "intent": "x", "profile": {"id": "lc.cine.desert-heat", "amount": 0.45}}
+    plan, notes = directed.sanitize_plan(raw, slot="C")
+    assert plan["profile"] == {"id": "lc.cine.desert-heat", "amount": 45.0} and directed.is_executable(plan)
+    document, _ = directed.compile_document(plan, "raw")
+    assert document == {"profile": {"id": "lc.cine.desert-heat", "amount": 45.0}}   # one key in LightCraft's document
+    assert "底片风格：电影 · 沙漠热浪（45%）" in directed.describe_plan(plan)
+    # Amounts are held to 20..100 (50 when none is given); a bare id is accepted.
+    assert directed.sanitize_plan({**raw, "profile": {"id": "lc.vivid", "amount": 180}}, slot="B")[0]["profile"] \
+        == {"id": "lc.vivid", "amount": 100.0}
+    assert directed.sanitize_plan({**raw, "profile": "lc.vivid"}, slot="B")[0]["profile"] == {"id": "lc.vivid", "amount": 50.0}
+    # A is the natural version; an unknown profile, the default colour profile or null give none.
+    natural, notes = directed.sanitize_plan(raw, slot="A")
+    assert "profile" not in natural and any("A 是自然版本" in note for note in notes)
+    unknown, notes = directed.sanitize_plan({**raw, "profile": {"id": "lut:mine"}}, slot="B")
+    assert "profile" not in unknown and any("lut:mine" in note for note in notes)
+    for value in (None, "lc.color", {"id": "none"}):
+        assert "profile" not in directed.sanitize_plan({**raw, "profile": value}, slot="B")[0]
+    plain, _ = directed.sanitize_plan({"title": "t", "develop": {"color": {"vibrance": 5}}}, slot="B")
+    assert "profile" not in directed.compile_document(plain, "jpeg")[0]
+    # The refinement of a delivered version ("R") may take one.
+    assert directed.sanitize_plan(raw, slot="R")[0]["profile"]["id"] == "lc.cine.desert-heat"
+
+    block = directed._looks_block({"profile:lc.cine.desert-heat": {"chroma": 1.02, "distance": 4.2, "a": 1.0, "b": 3.9},
+                                   "profile:lc.film.cool-fade": {"distance": 2.3, "a": -0.45, "b": -0.1}}, 12.0)
+    line = next(line for line in block.splitlines() if line.startswith("- lc.cine.desert-heat"))
+    assert ("[on this photo at amount 50: frame colourfulness 12.2 = x1.02 image 1; cast yellow 3.9, magenta 1.0"
+            " (mean Lab); changes the picture by 4.2]") in line
+    cool = next(line for line in block.splitlines() if line.startswith("- lc.film.cool-fade"))
+    assert "[on this photo at amount 50: cast green 0.5 (mean Lab); changes the picture by 2.3]" in cool
+    assert "PROFILES:" in block and "Never on A" in block and "at most 10 either way" in block
+    assert "45 up on this RAW" in directed._looks_block(None, None, 5.0, "raw")
+    assert all(f"- {profile_id} (" in block for profile_id in directed.PROFILES)
+    assert '"profile": {"id": "...", "amount": 50} or null' in directed._PLAN_SHAPE
 
 
 def test_a_look_that_keeps_the_frame_off_its_chroma_gets_a_strength():

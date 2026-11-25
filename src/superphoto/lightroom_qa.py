@@ -77,6 +77,14 @@ def render_distance(first_path: Path, second_path: Path, *, max_edge: int = 960)
     return _perceptual_distance(first.rgb, second.rgb)
 
 
+def colour_shift(first_path: Path, second_path: Path, *, max_edge: int = 960) -> dict[str, float]:
+    """Mean Lab change from the first picture to the second: "a" (green - / magenta +), "b" (blue - / yellow +)."""
+    first = _read_pixels(first_path, max_edge=max_edge)
+    second = _read_pixels(second_path, size=(first.rgb.shape[1], first.rgb.shape[0]))
+    delta = (_rgb_to_lab(second.rgb) - _rgb_to_lab(first.rgb)).reshape(-1, 3).mean(axis=0)
+    return {"a": round(float(delta[1]), 2), "b": round(float(delta[2]), 2)}
+
+
 def is_distinct_candidate(
     rendered_path: Path,
     accepted_paths: list[Path],
