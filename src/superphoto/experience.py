@@ -32,7 +32,7 @@ from PIL import Image
 
 from . import tone
 from .db import VERDICT_NAMES, get_directions, insert_direction
-from .looks import LOOKS
+from .looks import LOOKS, is_strong_look
 
 PROFILE_VERSION = 2
 METHOD_PREFIX = "direction:"
@@ -174,19 +174,37 @@ AIRY_ROLE = (
     " separation through local light, not through contrast. Not for a night or a low-key frame whose mood is its"
     " darkness.")
 
+SUBTLE_FILM_ROLE = (
+    "Light film polish (轻量胶片): a restrained, everyday-deliverable colour elevation built on a [轻量风格]"
+    " reference look at MODERATE strength (0.45-0.70, never heavy filter). Keeps skin natural and whites clean"
+    " while adding refined filmic warmth/coolness separation, crisp local depth and delicate organic texture."
+    " Distinct from A in mood and polish, yet versatile enough to be the user's primary delivery edit.")
+CLEAN_TONE_ROLE = (
+    "Clean luminous contrast (清透光影): transparent, crisp light sculpting with slightly open shadows, clean"
+    " highlight roll-off and clear subject separation—zero heavy colour cast and zero muddy matte. A brighter,"
+    " cleaner alternative to A focused purely on optical clarity and tonal polish.")
+
 NATURAL = Direction("natural", "自然完成", NATURAL_ROLE, natural=True, vignette_floor=-10.0)
 BUILTIN: tuple[Direction, ...] = (
     NATURAL,
-    Direction("dramatic", "戏剧光影", DRAMATIC_ROLE),
+    Direction("clean_tone", "清透光影", CLEAN_TONE_ROLE),
     Direction("airy", "通透明亮", AIRY_ROLE),
+    Direction("subtle_film", "轻量胶片", SUBTLE_FILM_ROLE),
+    Direction("dramatic", "戏剧光影", DRAMATIC_ROLE),
     Direction("palette", "风格化色彩", PALETTE_ROLE),
 )
 
 
 def _look_direction(look_id: str, look: dict[str, Any]) -> Direction:
-    return Direction(f"look:{look_id}", look["title"],
-                     f"Colour style on the reference look {look_id} ({look['title']}; made for: {look['use']}). "
-                     + PALETTE_ROLE.removeprefix("Colour style: "), look=look_id, origin="look")
+    if is_strong_look(look_id):
+        role = (f"Strong stylization on {look_id} ({look['title']}; made for: {look['use']}; USE SPARINGLY — at most"
+                " ONE strong stylized version per set). ") + PALETTE_ROLE.removeprefix("Colour style: ")
+    else:
+        role = (f"Light colour style on {look_id} ({look['title']}; made for: {look['use']}; use at tasteful moderate"
+                " strength 0.50-0.75 so skin and whites remain believable). ") + SUBTLE_FILM_ROLE.removeprefix(
+            "Light film polish (轻量胶片): "
+        )
+    return Direction(f"look:{look_id}", look["title"], role, look=look_id, origin="look")
 
 
 def library(conn: sqlite3.Connection | None = None) -> dict[str, Direction]:
@@ -321,9 +339,11 @@ def weights(conn: sqlite3.Connection, current: dict[str, Any], directions: Itera
     return {d: evidence.get(d, {}).get("weight", 1.0) for d in directions}
 
 
-def display_order(slot_weights: dict[str, float]) -> list[str]:
-    """Versions the user is likelier to keep come first; ties keep the slot order (A first)."""
-    return sorted(slot_weights, key=lambda slot: (-slot_weights[slot], slot))
+def display_order(slot_weights: dict[str, float], *, strong_slots: set[str] | None = None) -> list[str]:
+    """Versions the user is likelier to keep come first; on equal weight, natural & lightly stylized
+    versions appear ahead of strong stylizations (while still preserving A-first slot order)."""
+    strong = strong_slots or set()
+    return sorted(slot_weights, key=lambda slot: (-slot_weights[slot], 1 if slot in strong else 0, slot))
 
 
 TASTE_KEYS = ("black", "mid", "white", "warmth")

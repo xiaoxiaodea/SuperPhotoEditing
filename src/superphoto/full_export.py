@@ -137,10 +137,17 @@ def export_full(settings: Settings, conn: sqlite3.Connection, job_id: str, slot:
         if not original.is_file():
             raise FullExportUnavailable("原片已不在本机，无法导出原尺寸。")
         folder.mkdir(parents=True, exist_ok=True)
-        source = folder / f"source{original.suffix.lower()}"
+        use_negative = (settings.raster_negative_enabled and (root / "negative.json").is_file()
+                        and original.suffix.lower() in {".jpg", ".jpeg", ".png"})
+        source = folder / ("source.tif" if use_negative else f"source{original.suffix.lower()}")
         started = time.monotonic()
         try:
-            shutil.copy2(original, source)
+            if use_negative:
+                from .raster_negative import prepare_raster_negative
+
+                prepare_raster_negative(original, source, max_edge=0)
+            else:
+                shutil.copy2(original, source)
             output.unlink(missing_ok=True)
             render_document(binary, source, document, folder, edge=0, timeout=RENDER_TIMEOUT,
                             name=output.name, quality=spec["quality"], options=spec["options"])

@@ -108,9 +108,16 @@ class WorkerLock:
 
 
 def recover_interrupted(conn: sqlite3.Connection) -> None:
-    for table in ("jobs", "refinements"):
+    for table in ("jobs", "refinements", "style_batch_items"):
+        exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+        if not exists:
+            continue
         conn.execute(f"""UPDATE {table} SET status='error', step='error',
             error=?, updated_at=? WHERE status='running'""", (INTERRUPTED, utcnow()))
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='style_batches'").fetchone():
+        from .db import refresh_style_batch_counts
+        for row in conn.execute("SELECT id FROM style_batches WHERE status IN ('queued', 'running')").fetchall():
+            refresh_style_batch_counts(conn, row["id"])
     conn.commit()
 
 
@@ -118,9 +125,13 @@ def claim_next(conn: sqlite3.Connection) -> tuple[str, dict] | None:
     """Claim before touching output directories, so a crash never replays work."""
     try:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("""SELECT 'jobs' AS kind, id, created_at FROM jobs WHERE status='queued'
-            UNION ALL SELECT 'refinements', id, created_at FROM refinements WHERE status='queued'
-            ORDER BY created_at, kind, id LIMIT 1""").fetchone()
+        has_batch = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='style_batch_items'").fetchone()
+        query = """SELECT 'jobs' AS kind, id, created_at FROM jobs WHERE status='queued'
+            UNION ALL SELECT 'refinements', id, created_at FROM refinements WHERE status='queued'"""
+        if has_batch:
+            query += "\n            UNION ALL SELECT 'style_batch_items', id, created_at FROM style_batch_items WHERE status='queued'"
+        query += "\n            ORDER BY created_at, kind, id LIMIT 1"
+        row = conn.execute(query).fetchone()
         if row is None:
             conn.commit()
             return None
@@ -128,6 +139,9 @@ def claim_next(conn: sqlite3.Connection) -> tuple[str, dict] | None:
         conn.execute(f"UPDATE {table} SET status='running', step='starting', updated_at=? WHERE id=?",
                      (utcnow(), row["id"]))
         record = dict(conn.execute(f"SELECT * FROM {table} WHERE id=?", (row["id"],)).fetchone())
+        if table == "style_batch_items":
+            conn.execute("UPDATE style_batches SET status='running', updated_at=? WHERE id=?",
+                         (utcnow(), record["batch_id"]))
         conn.commit()
         return table, record
     except BaseException:
@@ -138,9 +152,11 @@ def claim_next(conn: sqlite3.Connection) -> tuple[str, dict] | None:
 class TaskWorker:
     def __init__(self, db_path: Path, jobs_dir: Path,
                  run_job: Callable[[str, Path], None], run_refinement: Callable[[str], None],
-                 poll_interval: float = 0.5):
+                 poll_interval: float = 0.5,
+                 run_style_item: Callable[[str], None] | None = None):
         self.db_path, self.jobs_dir = db_path, jobs_dir
         self.run_job, self.run_refinement = run_job, run_refinement
+        self.run_style_item = run_style_item
         self.poll_interval = poll_interval
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -199,6 +215,10 @@ class TaskWorker:
                 if not original.is_file():
                     raise FileNotFoundError("原片已不在本机，请重新选择照片")
                 self.run_job(record["id"], original)
+            elif table == "style_batch_items":
+                if self.run_style_item is None:
+                    raise RuntimeError("当前 worker 未启用批量同风格处理")
+                self.run_style_item(record["id"])
             else:
                 self.run_refinement(record["id"])
         except Exception as exc:
@@ -209,4 +229,7 @@ class TaskWorker:
         conn.execute(f"""UPDATE {table} SET status='error', step='error', error=?, updated_at=?
             WHERE id=? AND status='running'""",
             (error or "后台处理结束但未保存结果，请重试。", utcnow(), record["id"]))
+        if table == "style_batch_items":
+            from .db import refresh_style_batch_counts
+            refresh_style_batch_counts(conn, record["batch_id"])
         conn.commit()

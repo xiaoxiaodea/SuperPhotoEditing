@@ -179,7 +179,8 @@ def _bounded_lstsq(matrix: np.ndarray, rhs: np.ndarray, lo: np.ndarray, hi: np.n
     return value
 
 
-def fit_curve(measured: dict[str, float], targets: dict[str, float]) -> tuple[list[list[float]], dict[str, float]]:
+def fit_curve(measured: dict[str, float], targets: dict[str, float], *,
+              max_slope: float = MAX_SLOPE) -> tuple[list[list[float]], dict[str, float]]:
     """Smooth master curve that takes the measured anchors as close to their targets as it cleanly can.
 
     The curve is piecewise linear on fixed knots with every slope inside
@@ -222,7 +223,7 @@ def fit_curve(measured: dict[str, float], targets: dict[str, float]) -> tuple[li
     # white anchor the curve may run nearly flat, as a levels adjustment does.
     populated = (_KNOT_X[1:] > float(measured[names[0]])) & (_KNOT_X[:-1] < float(measured[names[-1]]))
     lo = np.concatenate([[0.0], np.where(populated, MIN_SLOPE, 0.02) * steps])
-    hi = np.concatenate([[0.35], MAX_SLOPE * steps])
+    hi = np.concatenate([[0.35], float(max_slope) * steps])
     solution = _bounded_lstsq(np.asarray(rows), np.asarray(rhs), lo, hi)
     values = np.clip(cumulative @ solution, 0.0, 1.0)
     curve = [[round(float(x), 4), round(float(y), 4)] for x, y in zip(_KNOT_X, values)]
@@ -281,8 +282,16 @@ RAW_SHIFT_LIMITS: dict[str, tuple[float, float]] = {"shadows": (-3.0, 3.0), "mid
                                                     "highlights": (-1.5, 2.6), "white": (-1.5, 2.6)}
 
 
-def shift_limits(source_kind: str) -> dict[str, tuple[float, float]]:
-    return RAW_SHIFT_LIMITS if source_kind == "raw" else SHIFT_LIMITS
+GAIN_MAP_SHIFT_LIMITS: dict[str, tuple[float, float]] = {"shadows": (-3.0, 1.8), "mid": (-1.5, 1.8),
+                                                         "highlights": (-2.0, 2.4), "white": (-2.0, 2.4)}
+
+
+def shift_limits(source_kind: str, *, has_gain_map: bool = False) -> dict[str, tuple[float, float]]:
+    if source_kind == "raw":
+        return RAW_SHIFT_LIMITS
+    if has_gain_map:
+        return GAIN_MAP_SHIFT_LIMITS
+    return SHIFT_LIMITS
 # The least gap kept between neighbouring targets after a bound moved one of them.
 TARGET_GAP = 0.004
 
@@ -703,7 +712,8 @@ def solve_scene(render: Callable[..., Path], targets: dict[str, float],
                 saturation_range: tuple[float, float] = (-60.0, 40.0),
                 neutral: Callable[[np.ndarray], float] | None = None,
                 unedited: dict[str, float] | None = None,
-                shift_limits: dict[str, tuple[float, float]] | None = None) -> dict[str, Any]:
+                shift_limits: dict[str, tuple[float, float]] | None = None,
+                max_slope: float = MAX_SLOPE) -> dict[str, Any]:
     """Place tones, region brightness, region colour and colour intensity by measurement.
 
     ``render(curve, exposure, local, saturation)`` renders a small preview and
@@ -939,7 +949,7 @@ def solve_scene(render: Callable[..., Path], targets: dict[str, float],
                 # the one below alone lifts the darkest tones without bringing the region along (p8-r1 DSC_1441 C:
                 # black 0.12 -> 0.21 for camels between black and shadows, camels unmoved).
                 moved = dict(aims, **{name: round(follows, 4)})
-                gained = ev_between(planned, curve_value(fit_curve(state["reference"], moved)[0], planned_box))
+                gained = ev_between(planned, curve_value(fit_curve(state["reference"], moved, max_slope=max_slope)[0], planned_box))
                 if gained * excess <= 0 or abs(gained) < GIVE_WAY_CARRY * abs(excess):
                     continue
                 aims[name] = round(follows, 4)
@@ -982,7 +992,7 @@ def solve_scene(render: Callable[..., Path], targets: dict[str, float],
         plane = luma_of(frame["rgb"])
         candidates = {index: covers[index] for index in toned if index not in missed}
         named = [name for name in ORDER if name in targets]
-        trial = fit_curve(state["reference"], targets)[0] if FOLLOW == "excess" else None
+        trial = fit_curve(state["reference"], targets, max_slope=max_slope)[0] if FOLLOW == "excess" else None
         if trial is not None and LIFT_KEEP > 0:
             keep_lifts(trial)
         for name in OWNED_ANCHORS:
@@ -1040,7 +1050,7 @@ def solve_scene(render: Callable[..., Path], targets: dict[str, float],
             if name in measured and name in state["widest"]:
                 measured[name] = pick(measured[name], state["widest"][name])
         # "fit_to" is set only by the closing pass: the aims moved by what the finished frame missed them by.
-        state["curve"], state["executed"] = fit_curve(measured, state.get("fit_to") or state["aims"])
+        state["curve"], state["executed"] = fit_curve(measured, state.get("fit_to") or state["aims"], max_slope=max_slope)
 
     def settle_curve(passes: int) -> None:
         """Fit the curve to the frame as planned and correct for what the engine does differently."""

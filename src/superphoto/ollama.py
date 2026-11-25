@@ -86,20 +86,25 @@ def chat_vision(settings: Settings, model: str, prompt: str, image_b64: str | li
     Preserve the full response before validation, including HTTP error JSON, so
     a rejected or incomplete answer can still be investigated by the caller.
     """
+    image_list = [image_b64] if isinstance(image_b64, str) else list(image_b64)
+    # A single 1280px VL preview + legacy critique prompt fits in 16k/4k, but
+    # multi-version directed planning (~38k chars + 2 images) or batched damage
+    # checks (7 images) exceed 16k and truncate JSON (done_reason=length).
+    est_prompt_tokens = len(prompt) // 3 + len(image_list) * 2048
+    num_predict = 8192 if len(prompt) > 12000 else 4096
+    num_ctx = 32768 if (est_prompt_tokens + num_predict) > 14000 else 16384
     payload = {
         "model": model,
         "stream": False,
         "format": response_schema if response_schema is not None else "json",
         "think": False,
         "keep_alive": "30m",
-        # A 1280px VL preview + the critique prompt is ~4k tokens. num_ctx 4096
-        # leaves ~200 output tokens and truncates JSON (done_reason=length).
-        "options": {"temperature": 0.2, "num_ctx": 16384, "num_predict": 4096},
+        "options": {"temperature": 0.2, "num_ctx": num_ctx, "num_predict": num_predict},
         "messages": [
             {
                 "role": "user",
                 "content": prompt,
-                "images": [image_b64] if isinstance(image_b64, str) else image_b64,
+                "images": image_list,
             }
         ],
     }

@@ -7,7 +7,7 @@
     <title>SuperPhoto · 照片工作室</title>
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
     <style>html, body { margin: 0; min-height: 100%; background: #141516; color: #eeeeef; }</style>
-    <link rel="stylesheet" href="./styles.css?v=23" />
+    <link rel="stylesheet" href="./styles.css?v=25" />
   </head>
   <body>
     <header class="top">
@@ -129,6 +129,62 @@
       <div id="vision-body"></div>
       <p id="vision-error" class="vision-error" role="alert"></p>
     </dialog>
-    <script src="./app.js?v=23"></script>
+    <dialog id="sync-dialog" class="sync-dialog" aria-labelledby="sync-title">
+      <div class="sync-head">
+        <div class="sync-anchor">
+          <img id="sync-anchor-img" alt="基准成片" />
+          <div>
+            <span class="eyebrow">SERIES STYLE SYNC</span>
+            <h2 id="sync-title">同风格批量套用</h2>
+            <p id="sync-anchor-desc" class="sync-sub"></p>
+          </div>
+        </div>
+        <button type="button" class="btn ghost" id="sync-close" aria-label="关闭">关闭</button>
+      </div>
+
+      <div class="sync-controls" id="sync-controls">
+        <div class="sync-drop" id="sync-drop" tabindex="0" role="button" aria-label="拖放或选择多张照片">
+          <input id="sync-files" type="file" multiple accept=".jpg,.jpeg,.png,.tif,.tiff,.arw,.cr2,.cr3,.nef,.dng,.raf,.orf,.rw2,.pef,.srw,.raw" hidden />
+          <div class="sync-drop-copy">
+            <strong>选择或拖放同一组拍摄的其他照片（支持多选 RAW / JPG / PNG）</strong>
+            <span id="sync-picked-hint">系统会提取当前成片的色彩科学、影调与氛围，并为每张照片独立计算最佳曝光与冷暖，无需等待视觉模型重跑。</span>
+          </div>
+          <button type="button" class="btn ghost" id="sync-pick">选择多张照片</button>
+        </div>
+
+        <div class="sync-options">
+          <label class="sync-check"><input type="checkbox" id="sync-match-exp" checked /> 自动对齐曝光与影调（统一整组明暗与哑光质感）</label>
+          <label class="sync-check"><input type="checkbox" id="sync-match-wb" checked /> 自动统一冷暖白平衡（修正机内色温漂移）</label>
+          <label class="sync-range">
+            <span>风格强度 <strong id="sync-strength-val" class="num">100%</strong></span>
+            <input type="range" id="sync-strength" min="40" max="120" step="5" value="100" />
+          </label>
+          <button type="button" class="btn primary" id="sync-start" disabled>开始统一风格 <span aria-hidden="true">↗</span></button>
+        </div>
+        <p id="sync-error" class="vision-error" role="alert"></p>
+      </div>
+
+      <div class="sync-batches-bar hidden" id="sync-batches-bar">
+        <span class="version-label">历史批量</span>
+        <div class="sync-batch-pills" id="sync-batch-pills"></div>
+      </div>
+
+      <div class="sync-results hidden" id="sync-results">
+        <div class="sync-progress-head">
+          <div>
+            <strong id="sync-progress-text">正在准备…</strong>
+            <span id="sync-progress-meta" class="sync-sub"></span>
+          </div>
+          <div class="sync-head-actions">
+            <a id="sync-zip" class="btn primary hidden" download>打包下载全部成片 (.zip) <span aria-hidden="true">↓</span></a>
+          </div>
+        </div>
+        <div class="sync-bar-track"><div class="sync-bar-fill" id="sync-bar-fill"></div></div>
+        <div class="sync-grid" id="sync-grid"></div>
+      </div>
+    </dialog>
+
+
+    <script src="./app.js?v=25"></script>
   </body>
 </html>

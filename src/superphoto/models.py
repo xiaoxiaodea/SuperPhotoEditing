@@ -609,6 +609,10 @@ class FullExportIn(BaseModel):
     format: Literal["jpeg", "tiff"] = "jpeg"
 
 
+class BatchFullExportIn(BaseModel):
+    format: Literal["jpeg", "tiff"] = "jpeg"
+
+
 class FeedbackIn(BaseModel):
     chosen_slot: Slot
     reaction: Literal[

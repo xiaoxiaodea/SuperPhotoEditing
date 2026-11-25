@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 from .tasks import TaskWorker, enqueue_source
@@ -37,12 +37,18 @@ from .db import (
     get_refinement,
     get_refinements,
     insert_refinement,
+    get_style_batch,
+    get_style_batch_item,
+    get_style_batch_items,
+    insert_style_batch,
+    insert_style_batch_item,
+    list_style_batches,
 )
 from .darktable_export import darktable_cli_path
 from .ingest import ALLOWED_EXTS, source_kind
 from .lightroom import LightroomError, connect_lightroom, install_lightroom_plugin, lightroom_status
-from . import full_export
-from .models import FeedbackIn, FullExportIn, RatingIn, RefinementIn
+from . import full_export, style_sync
+from .models import BatchFullExportIn, FeedbackIn, FullExportIn, RatingIn, RefinementIn
 from .vision import get_vision_status
 from .vault_routes import build_router as build_vault_router, publish_bridge, retract_bridge
 from .pipeline import run_job
@@ -109,7 +115,8 @@ async def lifespan(app: FastAPI):
     settings, _ = _boot()
     worker = TaskWorker(settings.db_path, settings.jobs_dir,
                         lambda job_id, original: _safe_run(job_id, original),
-                        lambda refinement_id: _safe_refine(refinement_id))
+                        lambda refinement_id: _safe_refine(refinement_id),
+                        run_style_item=lambda item_id: _safe_style_item(item_id))
     worker.start()
     _state["task_worker"] = worker
     publish_bridge(settings)
@@ -275,6 +282,14 @@ def connect_lr() -> dict[str, Any]:
         return status
     except LightroomError as exc:
         raise HTTPException(503, str(exc)) from exc
+
+
+@app.get("/api/directed-looks")
+def list_directed_looks() -> dict[str, Any]:
+    from .looks import catalog
+
+    items = catalog()
+    return {"count": len(items), "looks": items}
 
 
 @app.get("/api/looks")
@@ -495,6 +510,15 @@ def _safe_refine(refinement_id: str) -> None:
         conn.close()
 
 
+def _safe_style_item(item_id: str) -> None:
+    settings = _s()
+    conn = connect(settings.db_path)
+    try:
+        style_sync.run_batch_item(settings, conn, item_id)
+    finally:
+        conn.close()
+
+
 @app.get("/api/jobs/{job_id}/refinements/{refinement_id}")
 def refinement_status(job_id: str, refinement_id: str) -> dict:
     record = get_refinement(_c(), refinement_id)
@@ -543,6 +567,222 @@ def full_size_file(job_id: str, name: str) -> FileResponse:
     slot, _, version = target.partition("-")
     return FileResponse(path, media_type=full_export.FORMATS[fmt]["media_type"],
                         filename=full_export.download_name(slot, version or None, fmt))
+
+
+def _public_style_batch(settings: Settings, conn: sqlite3.Connection, batch: dict[str, Any],
+                        *, include_items: bool = True) -> dict[str, Any]:
+    profile = json.loads(batch["profile_json"])
+    payload: dict[str, Any] = {
+        "id": batch["id"],
+        "source_job_id": batch["source_job_id"],
+        "source_slot": batch["source_slot"],
+        "source_version": batch["source_version"],
+        "title": batch["title"],
+        "direction_title": profile.get("direction_title") or batch["title"],
+        "anchor_render_url": profile.get("anchor_render_url"),
+        "anchor_name": profile.get("source_name") or "",
+        "sync_options": profile.get("sync_options") or {},
+        "wb_offset": profile.get("wb_offset") or {},
+        "look": profile.get("look"),
+        "status": batch["status"],
+        "total_count": batch["total_count"],
+        "done_count": batch["done_count"],
+        "error_count": batch["error_count"],
+        "created_at": batch["created_at"],
+        "updated_at": batch["updated_at"],
+        "zip_url": f"/api/style-batches/{batch['id']}/download.zip" if batch["done_count"] > 0 else None,
+    }
+    if include_items:
+        items_out = []
+        for item in get_style_batch_items(conn, batch["id"]):
+            folder = style_sync.item_dir(settings, batch["id"], item["id"])
+            has_src = (folder / "baseline" / "source_preview.jpg").is_file()
+            metrics = json.loads(item["metrics_json"]) if item.get("metrics_json") else None
+            items_out.append({
+                "id": item["id"],
+                "original_name": item["original_name"],
+                "status": item["status"],
+                "step": item["step"],
+                "error": _public_error(item.get("error")),
+                "source_url": f"/api/style-batches/{batch['id']}/items/{item['id']}/source" if has_src else None,
+                "result_url": (f"/api/style-batches/{batch['id']}/items/{item['id']}/image"
+                               if item["status"] == "ready" else None),
+                "metrics": metrics,
+            })
+        payload["items"] = items_out
+    return payload
+
+
+@app.post("/api/jobs/{job_id}/sync-style", status_code=202)
+async def create_style_batch(
+    job_id: str,
+    files: list[UploadFile] = File(...),
+    slot: str = Form("A"),
+    version: str | None = Form(None),
+    match_exposure: bool = Form(True),
+    match_wb: bool = Form(True),
+    style_strength: float = Form(1.0),
+) -> dict[str, Any]:
+    """Transfer one perfected edit's style onto a batch of photos from the same shoot."""
+    settings, conn = _boot()
+    slot = str(slot or "").strip().upper()
+    if slot not in SLOT_LETTERS:
+        raise HTTPException(400, f"无效的方案槽位：{slot}")
+    if not settings.lightroom_enabled:
+        raise HTTPException(409, "批量同风格套用需要启用 LightCraft 渲染引擎")
+    if not files:
+        raise HTTPException(400, "请至少选择一张照片")
+    if len(files) > 200:
+        raise HTTPException(400, "单次最多批量套用 200 张照片")
+    version_clean = (version or "").strip() or None
+    strength = max(0.3, min(1.3, float(style_strength)))
+
+    binary: Path | None = None
+    try:
+        client, _ = connect_lightroom(settings.lightcraft_bin)
+        binary = Path(client.binary)
+    except LightroomError:
+        binary = None
+
+    try:
+        profile = style_sync.extract_style_profile(settings, conn, job_id, slot, version_clean, binary=binary)
+    except (ValueError, full_export.FullExportUnavailable) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+    profile["sync_options"] = {
+        "match_exposure": bool(match_exposure),
+        "match_wb": bool(match_wb),
+        "style_strength": round(strength, 2),
+    }
+
+    batch_id = str(uuid.uuid4())
+    root = style_sync.batch_dir(settings, batch_id)
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+    staged: list[tuple[str, str, str]] = []
+    try:
+        for upload in files:
+            name = Path(upload.filename or "photo.bin").name
+            ext = Path(name).suffix.lower()
+            if ext not in ALLOWED_EXTS:
+                raise HTTPException(400, f"不支持的文件格式：{name}（{ext or '无后缀'}）")
+            item_id = str(uuid.uuid4())
+            folder = style_sync.item_dir(settings, batch_id, item_id)
+            folder.mkdir(parents=True, exist_ok=True)
+            original = folder / f"original{ext}"
+            size = 0
+            with original.open("wb") as output:
+                while chunk := await upload.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise HTTPException(400, f"{name} 超过单张 {settings.max_upload_mb} MB 上限")
+                    output.write(chunk)
+                if not size:
+                    raise HTTPException(400, f"{name} 是空文件")
+                output.flush()
+                os.fsync(output.fileno())
+            staged.append((item_id, name, original.name))
+            await upload.close()
+        with _lock:
+            insert_style_batch(conn, batch_id, job_id, slot, version_clean, profile["title"], profile, len(staged))
+            for item_id, name, orig_file in staged:
+                insert_style_batch_item(conn, item_id, batch_id, name, orig_file)
+    except BaseException:
+        shutil.rmtree(root, ignore_errors=True)
+        for upload in files:
+            try:
+                await upload.close()
+            except Exception:
+                pass
+        raise
+
+    _wake_worker()
+    batch = get_style_batch(conn, batch_id)
+    return _public_style_batch(settings, conn, batch)
+
+
+@app.get("/api/style-batches")
+def get_style_batches(job_id: str | None = None) -> dict[str, Any]:
+    settings, conn = _boot()
+    rows = list_style_batches(conn, source_job_id=job_id)
+    return {"batches": [_public_style_batch(settings, conn, row, include_items=False) for row in rows]}
+
+
+@app.get("/api/style-batches/{batch_id}")
+def style_batch_status(batch_id: str) -> dict[str, Any]:
+    settings, conn = _boot()
+    batch = get_style_batch(conn, batch_id)
+    if not batch:
+        raise HTTPException(404, "找不到这次批量同风格任务")
+    return _public_style_batch(settings, conn, batch, include_items=True)
+
+
+@app.get("/api/style-batches/{batch_id}/items/{item_id}/image")
+def style_batch_item_image(batch_id: str, item_id: str) -> FileResponse:
+    settings, conn = _boot()
+    item = get_style_batch_item(conn, item_id)
+    if not item or item["batch_id"] != batch_id or item["status"] != "ready":
+        raise HTTPException(404, "找不到已完成的批量成片")
+    path = style_sync.item_dir(settings, batch_id, item_id) / (item["output_filename"] or "result/result.jpg")
+    if not path.is_file():
+        raise HTTPException(404, "批量成片已不在本机")
+    stem = Path(item["original_name"] or "photo").stem
+    return FileResponse(path, media_type="image/jpeg", filename=f"{stem}-同风格.jpg")
+
+
+@app.get("/api/style-batches/{batch_id}/items/{item_id}/source")
+def style_batch_item_source(batch_id: str, item_id: str) -> FileResponse:
+    settings, conn = _boot()
+    item = get_style_batch_item(conn, item_id)
+    if not item or item["batch_id"] != batch_id:
+        raise HTTPException(404, "找不到原片预览")
+    path = style_sync.item_dir(settings, batch_id, item_id) / "baseline" / "source_preview.jpg"
+    if not path.is_file():
+        raise HTTPException(404, "原片预览尚未生成")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@app.post("/api/style-batches/{batch_id}/items/{item_id}/full")
+def style_batch_item_full(batch_id: str, item_id: str, body: BatchFullExportIn) -> dict[str, Any]:
+    settings, conn = _boot()
+    try:
+        client, _ = connect_lightroom(settings.lightcraft_bin)
+        result = style_sync.export_batch_item_full(settings, conn, batch_id, item_id, body.format,
+                                                   binary=Path(client.binary))
+    except full_export.FullExportUnavailable as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except LightroomError as exc:
+        raise HTTPException(503, f"原尺寸导出失败：{exc}") from exc
+    return {
+        "url": f"/api/style-batches/{batch_id}/items/{item_id}/full/{body.format}",
+        "filename": result["filename"],
+        **{k: result.get(k) for k in ("format", "width", "height", "bytes", "seconds", "cached")},
+    }
+
+
+@app.get("/api/style-batches/{batch_id}/items/{item_id}/full/{fmt}")
+def style_batch_item_full_file(batch_id: str, item_id: str, fmt: str) -> FileResponse:
+    if fmt not in full_export.FORMATS:
+        raise HTTPException(404, "不支持的格式")
+    settings, conn = _boot()
+    item = get_style_batch_item(conn, item_id)
+    if not item or item["batch_id"] != batch_id:
+        raise HTTPException(404, "找不到记录")
+    spec = full_export.FORMATS[fmt]
+    path = style_sync.item_dir(settings, batch_id, item_id) / "full" / f"render{spec['suffix']}"
+    if not path.is_file():
+        raise HTTPException(404, "原尺寸文件尚未导出")
+    stem = Path(item["original_name"] or "photo").stem
+    return FileResponse(path, media_type=spec["media_type"], filename=f"{stem}-同风格-原尺寸{spec['suffix']}")
+
+
+@app.get("/api/style-batches/{batch_id}/download.zip")
+def style_batch_download_zip(batch_id: str) -> FileResponse:
+    settings, conn = _boot()
+    try:
+        archive = style_sync.build_batch_zip(settings, conn, batch_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return FileResponse(archive, media_type="application/zip", filename=f"SuperPhoto-同风格批量-{batch_id[:8]}.zip")
 
 
 @app.post("/api/jobs/{job_id}/feedback")

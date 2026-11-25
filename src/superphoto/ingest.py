@@ -135,7 +135,9 @@ def downscale_linear(linear: np.ndarray, max_edge: int) -> np.ndarray:
 
 def read_exif(path: Path) -> dict[str, str]:
     try:
+        import logging
         import exifread
+        logging.getLogger("exifread").setLevel(logging.ERROR)
     except ImportError:
         return _pillow_exif(path)
     keys = (
@@ -143,13 +145,20 @@ def read_exif(path: Path) -> dict[str, str]:
         "EXIF PhotographicSensitivity",
         "EXIF FNumber",
         "EXIF ExposureTime",
+        "EXIF ExposureBiasValue",
         "EXIF FocalLength",
+        "EXIF FocalLengthIn35mmFilm",
         "Image Model",
         "Image Make",
+        "EXIF LensMake",
         "EXIF LensModel",
         "EXIF WhiteBalance",
         "EXIF ColorSpace",
         "EXIF DateTimeOriginal",
+        "GPS GPSLatitude",
+        "GPS GPSLatitudeRef",
+        "GPS GPSLongitude",
+        "GPS GPSLongitudeRef",
     )
     out: dict[str, str] = {}
     try:
@@ -160,6 +169,13 @@ def read_exif(path: Path) -> dict[str, str]:
     for key in keys:
         if key in tags:
             out[key.split(" ", 1)[-1]] = str(tags[key])
+    if not out:
+        return _pillow_exif(path)
+    # Fill any missing core fields from Pillow EXIF IFD (some JPEGs/PNGs/TIFFs store tags only Pillow sees).
+    if not {"ISOSpeedRatings", "PhotographicSensitivity", "FNumber", "ExposureTime", "Model"} & out.keys():
+        fallback = _pillow_exif(path)
+        for k, v in fallback.items():
+            out.setdefault(k, v)
     return out
 
 
@@ -169,6 +185,13 @@ def _pillow_exif(path: Path) -> dict[str, str]:
             info = im.getexif()
             if not info:
                 return {}
+            merged: dict[int, Any] = dict(info.items())
+            try:
+                exif_ifd = info.get_ifd(0x8769)
+                if exif_ifd:
+                    merged.update(exif_ifd.items())
+            except Exception:
+                pass
             named = {
                 271: "Make",
                 272: "Model",
@@ -176,12 +199,31 @@ def _pillow_exif(path: Path) -> dict[str, str]:
                 33437: "FNumber",
                 34855: "ISOSpeedRatings",
                 36867: "DateTimeOriginal",
+                37380: "ExposureBiasValue",
                 37386: "FocalLength",
+                41989: "FocalLengthIn35mmFilm",
+                42035: "LensMake",
+                42036: "LensModel",
             }
-            return {
-                name: str(info.get(tag))
+            out = {
+                name: str(merged[tag]).strip()
                 for tag, name in named.items()
-                if info.get(tag) is not None
+                if merged.get(tag) is not None and str(merged[tag]).strip()
             }
+            try:
+                gps_ifd = info.get_ifd(0x8825)
+                if gps_ifd:
+                    gps_named = {
+                        1: "GPSLatitudeRef",
+                        2: "GPSLatitude",
+                        3: "GPSLongitudeRef",
+                        4: "GPSLongitude",
+                    }
+                    for tag, name in gps_named.items():
+                        if gps_ifd.get(tag) is not None:
+                            out[name] = str(gps_ifd[tag])
+            except Exception:
+                pass
+            return out
     except Exception:
         return {}

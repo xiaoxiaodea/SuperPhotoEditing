@@ -144,6 +144,57 @@ def with_denoise(document: dict[str, Any], amount: float) -> dict[str, Any]:
     return {**document, "enhance": enhance}
 
 
+def raster_protection(document: dict[str, Any], source_kind: str,
+                      negative_meta: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Adaptive NR + anti-banding micro-grain when lifting an ordinary JPEG or PNG.
+
+    LightCraft AI Denoise runs on Bayer RAWs only, so pushing an 8-bit JPEG/PNG dark
+    region exposes chroma macroblocks and smooth-gradient banding. Scale LightCraft's
+    conventional luminance/colour NR and subtle dither grain with both the actual
+    shadow push (``push_stops``) and the measured compression/banding risk.
+    """
+    if source_kind not in {"jpeg", "png"}:
+        return None
+    meta = negative_meta or {}
+    if int(meta.get("bit_depth") or 8) >= 16 and push_stops(document) < 1.2:
+        return None
+    stops = push_stops(document)
+    blockiness = _number(meta.get("jpeg_blockiness"))
+    banding = _number(meta.get("banding_risk"))
+    if stops < 0.65 and not (blockiness >= 0.12 and stops >= 0.35) and not (banding >= 0.25 and stops >= 0.45):
+        return None
+    nr_luma = round(min(34.0, max(10.0, 8.0 + stops * 9.5 + blockiness * 18.0)), 1)
+    nr_color = round(min(45.0, max(16.0, 14.0 + stops * 11.0 + blockiness * 24.0)), 1)
+    grain = 0.0
+    if not meta.get("has_gain_map") and ((banding >= 0.22 and stops >= 0.65) or (blockiness >= 0.22 and stops >= 0.5)):
+        grain = round(min(9.0, max(4.0, 3.5 + stops * 2.2 + banding * 3.5)), 1)
+    return {
+        "nr_luminance": nr_luma,
+        "nr_color": nr_color,
+        "grain": grain,
+        "stops": round(stops, 2),
+        "blockiness": round(blockiness, 3),
+        "banding_risk": round(banding, 3),
+    }
+
+
+def with_raster_protection(document: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    """Merge adaptive JPEG/PNG NR and anti-banding micro-grain without lowering stronger plan values."""
+    out = dict(document)
+    detail = dict(out.get("detail") or {})
+    detail["nr_luminance"] = max(_number(detail.get("nr_luminance")), float(spec["nr_luminance"]))
+    detail["nr_color"] = max(_number(detail.get("nr_color")), float(spec["nr_color"]))
+    out["detail"] = detail
+    if float(spec.get("grain") or 0.0) > 0.0:
+        grain = dict(out.get("grain") or {})
+        if _number(grain.get("amount")) < float(spec["grain"]):
+            grain["amount"] = float(spec["grain"])
+            grain.setdefault("size", 18.0)
+            grain.setdefault("roughness", 50.0)
+            out["grain"] = grain
+    return out
+
+
 def requested(document: dict[str, Any]) -> bool:
     enhance = document.get("enhance")
     return isinstance(enhance, dict) and bool(enhance.get("denoise_on")) and _number(enhance.get("denoise")) > 0

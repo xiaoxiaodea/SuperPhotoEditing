@@ -51,7 +51,7 @@ from . import experience
 from .db import SLOT_LETTERS
 from .experience import DRAMATIC_ROLE, NATURAL_ROLE, PALETTE_ROLE
 from .lightcraft import RELATIVE_WB_MODE
-from .looks import LOOKS, PROFILES, look_lines, profile_lines
+from .looks import LOOKS, PROFILES, is_strong_look, look_intensity, look_lines, profile_lines, shortlist_for_scene
 from .vision import VisionUnavailable, chat_vision, is_temporary, probe, provider_from, safe_error
 
 ENGINE = "lightcraft-directed"
@@ -71,11 +71,12 @@ ROLES = {"A": NATURAL_ROLE, "B": DRAMATIC_ROLE, "C": PALETTE_ROLE}
 GLOBAL_RANGES: dict[str, dict[str, tuple[float, float]]] = {
     "light": {"exposure": (-1.5, 1.5), "contrast": (-40, 50), "highlights": (-90, 30),
               "shadows": (-40, 70), "whites": (-50, 40), "blacks": (-50, 30)},
-    "color": {"vibrance": (-40, 40), "saturation": (-40, 25)},
-    "effects": {"texture": (-30, 35), "clarity": (-30, 35), "dehaze": (-20, 40)},
+    "color": {"vibrance": (-40, 60), "saturation": (-40, 25)},
+    "effects": {"texture": (-45, 35), "clarity": (-30, 35), "dehaze": (-50, 40)},
     "curve": {"highlights": (-40, 40), "lights": (-40, 40), "darks": (-40, 40), "shadows": (-40, 40)},
     "vignette": {"amount": (-40, 20), "midpoint": (0, 100), "feather": (0, 100)},
-    "detail": {"sharpen_amount": (0, 80), "nr_luminance": (0, 40), "nr_color": (0, 60)},
+    "detail": {"sharpen_amount": (0, 80), "sharpen_radius": (0.5, 3.0), "sharpen_detail": (0, 100),
+               "sharpen_masking": (0, 100), "nr_luminance": (0, 40), "nr_color": (0, 60)},
     "calibration": {"red_hue": (-40, 60), "red_sat": (-40, 80), "green_hue": (-60, 60), "green_sat": (-60, 40),
                     "blue_hue": (-70, 40), "blue_sat": (-60, 80), "shadows_tint": (-20, 20)},
     "grain": {"amount": (0, 45), "size": (0, 60), "roughness": (0, 100)},
@@ -85,7 +86,7 @@ WB_RANGES = {"temp": (-1500.0, 1500.0), "tint": (-30.0, 30.0)}
 JPEG_NEUTRAL_KELVIN = 6500.0
 MIXER_BANDS = ("red", "orange", "yellow", "green", "aqua", "blue", "purple", "magenta")
 MIXER_RANGES = {"hue": (-30.0, 30.0), "sat": (-50.0, 40.0), "lum": (-40.0, 40.0)}
-GRADING_WHEELS = ("shadows", "midtones", "highlights")
+GRADING_WHEELS = ("shadows", "midtones", "highlights", "global")
 WHEEL_RANGES = {"hue": (0.0, 360.0), "sat": (0.0, 30.0), "lum": (-30.0, 30.0)}
 GRADING_RANGES = {"blending": (0.0, 100.0), "balance": (-100.0, 100.0)}
 LOCAL_RANGES = {"exposure": (-1.2, 1.2), "contrast": (-40, 40), "highlights": (-80, 40), "shadows": (-40, 60),
@@ -93,8 +94,9 @@ LOCAL_RANGES = {"exposure": (-1.2, 1.2), "contrast": (-40, 40), "highlights": (-
                 "saturation": (-50, 35), "clarity": (-30, 35), "texture": (-30, 35), "dehaze": (-20, 45)}
 # What a look and the model's own values may add up to.
 MERGED_MIXER_RANGES = {"hue": (-60.0, 60.0), "sat": (-85.0, 60.0), "lum": (-45.0, 45.0)}
-MERGED_COLOR_RANGES = {"vibrance": (-60.0, 60.0), "saturation": (-60.0, 40.0)}
+MERGED_COLOR_RANGES = {"vibrance": (-60.0, 70.0), "saturation": (-60.0, 40.0)}
 MERGED_WHEEL_RANGES = {"hue": (0.0, 360.0), "sat": (0.0, 45.0), "lum": (-30.0, 30.0)}
+MERGED_WB_RANGES = {"temp": (-3200.0, 3800.0), "tint": (-45.0, 45.0)}
 # The solver may move global exposure further than the model is allowed to ask for directly.
 SOLVER_EXPOSURE_RANGE = (-2.5, 2.5)
 # Exposure the solver may put on a mask. A mask with a pixel-accurate part (luminance or colour, as its
@@ -577,12 +579,37 @@ def _merged_develop(plan: dict[str, Any]) -> dict[str, Any]:
                                         "lum": round(value.get("lum", 0.0) * strength, 2)}
                 elif key not in grading:
                     grading[key] = float(value)
+        elif group == "wb":
+            wb_dst = develop.setdefault("wb", {})
+            for key, value in values.items():
+                if key in MERGED_WB_RANGES:
+                    lo, hi = MERGED_WB_RANGES[key]
+                    wb_dst[key] = round(min(hi, max(lo, wb_dst.get(key, 0.0) + float(value) * strength)), 2)
+        elif group == "curve":
+            # Look-provided RGB split channel curves (red / green / blue) interpolate smoothly toward identity
+            # by look.strength without touching curve.master (which stays owned by the tone solver).
+            curve_dst = develop.setdefault("curve", {})
+            for ch, pts in values.items():
+                if ch in ("red", "green", "blue") and isinstance(pts, list) and ch not in curve_dst:
+                    curve_dst[ch] = [
+                        [round(float(x), 4), round(min(1.0, max(0.0, float(x) + (float(y) - float(x)) * strength)), 4)]
+                        for x, y in pts
+                    ]
+                elif ch not in ("red", "green", "blue", "master"):
+                    lo, hi = GLOBAL_RANGES.get("curve", {}).get(ch, (-40.0, 40.0))
+                    curve_dst[ch] = round(min(hi, max(lo, curve_dst.get(ch, 0.0) + float(pts) * strength)), 2)
         else:
             ranges = MERGED_COLOR_RANGES if group == "color" else GLOBAL_RANGES.get(group, {})
             target = develop.setdefault(group, {})
+            # Non-intensity shape parameters stay at their configured design values instead of scaling to 0.
+            unscaled = {"size", "roughness", "sharpen_radius", "sharpen_detail", "sharpen_masking", "midpoint", "feather"}
             for key, value in values.items():
                 lo, hi = ranges.get(key, (-100.0, 100.0))
-                target[key] = round(min(hi, max(lo, target.get(key, 0.0) + value * strength)), 2)
+                if key in unscaled:
+                    if key not in target:
+                        target[key] = round(min(hi, max(lo, float(value))), 2)
+                else:
+                    target[key] = round(min(hi, max(lo, target.get(key, 0.0) + value * strength)), 2)
     return develop
 
 
@@ -684,7 +711,8 @@ def compile_document(plan: dict[str, Any], source_kind: str, *,
     wb = develop.get("wb") or {}
     if abs(wb.get("temp", 0.0)) > 1e-6 or abs(wb.get("tint", 0.0)) > 1e-6:
         if source_kind in {"jpeg", "png", "tiff"}:
-            document["wb"] = {"mode": "custom", "temp": round(JPEG_NEUTRAL_KELVIN + wb.get("temp", 0.0), 1),
+            document["wb"] = {"mode": "custom",
+                              "temp": round(min(15000.0, max(2000.0, JPEG_NEUTRAL_KELVIN + wb.get("temp", 0.0))), 1),
                               "tint": round(wb.get("tint", 0.0), 2)}
         else:   # Made absolute from the RAW's as-shot reading when rendered (lightcraft.resolve_wb).
             document["wb"] = {"mode": RELATIVE_WB_MODE, "temp": round(wb.get("temp", 0.0), 1),
@@ -910,7 +938,8 @@ def solve_plan(plan: dict[str, Any], source_kind: str, render: Callable[[dict[st
                colors: Callable[[list[dict[str, float]]], list[list[float]]] | None = None,
                baseline: dict[str, float] | None = None,
                neutral: Callable[[np.ndarray], float] | None = None,
-               aspect: float | None = None
+               aspect: float | None = None,
+               negative_meta: dict[str, Any] | None = None,
                ) -> tuple[dict[str, Any], dict[str, Any], list[str], dict[str, Any] | None]:
     """Meet a plan's tone, region and colour targets by measurement.
 
@@ -926,7 +955,11 @@ def solve_plan(plan: dict[str, Any], source_kind: str, render: Callable[[dict[st
     """
     targets = tone_targets(plan)
     bound_notes: list[str] = []
-    limits = tone.shift_limits(source_kind)
+    has_gain_map = bool((negative_meta or {}).get("has_gain_map"))
+    limits = tone.shift_limits(source_kind, has_gain_map=has_gain_map)
+    banding_risk = float((negative_meta or {}).get("banding_risk") or 0.0)
+    max_slope = (2.45 if source_kind in {"jpeg", "png"} and not has_gain_map and banding_risk >= 0.25
+                 else tone.MAX_SLOPE)
     if targets and baseline:
         targets, bound_notes = tone.bound_shift(targets, baseline, limits)
     chroma = (plan.get("tone") or {}).get("chroma")
@@ -989,7 +1022,8 @@ def solve_plan(plan: dict[str, Any], source_kind: str, render: Callable[[dict[st
     report = tone.solve_scene(
         shoot, targets, regions, exposure=float((develop.get("light") or {}).get("exposure", 0.0)),
         exposure_range=SOLVER_EXPOSURE_RANGE, chroma=chroma, saturation=start_saturation,
-        saturation_range=saturation_range, neutral=neutral, unedited=baseline, shift_limits=limits)
+        saturation_range=saturation_range, neutral=neutral, unedited=baseline, shift_limits=limits,
+        max_slope=max_slope)
     if with_look and report.get("chroma"):
         report["chroma"] = {**report["chroma"], "look_room": look_up}
     apply(report["exposure"], report["local"], report["saturation"])
@@ -1488,10 +1522,12 @@ def plan_reach(plan: dict[str, Any], image: Image.Image | Path) -> list[dict[str
     return out
 
 
-def measure_looks(binary: Path, original: Path, folder: Path, source_kind: str) -> dict[str, dict[str, float]]:
-    """Every look at LOOK_PROBE_STRENGTH on this photo, against the unedited render: "chroma", its frame
-    colourfulness as a ratio (left out on a frame with no colour to speak of), and "distance", the mean Lab
-    difference (``lightroom_qa.render_distance``, the measure that calls sibling versions nearly identical).
+def measure_looks(binary: Path, original: Path, folder: Path, source_kind: str,
+                  look_ids: Iterable[str] | None = None) -> dict[str, dict[str, float]]:
+    """Selected looks (all by default) at LOOK_PROBE_STRENGTH on this photo, against the unedited render:
+    "chroma", its frame colourfulness as a ratio (left out on a frame with no colour to speak of), and
+    "distance", the mean Lab difference (``lightroom_qa.render_distance``, the measure that calls sibling
+    versions nearly identical).
 
     Every profile in looks.PROFILES is measured the same way at PROFILE_PROBE_AMOUNT, under the key
     "profile:<id>", with its mean Lab shift as well ("a" green-/magenta+, "b" blue-/yellow+): a profile is
@@ -1514,8 +1550,9 @@ def measure_looks(binary: Path, original: Path, folder: Path, source_kind: str) 
         except (LightCraftError, OSError):
             return name, None
 
+    target_ids = [lid for lid in (look_ids if look_ids is not None else LOOKS) if lid in LOOKS]
     jobs = [("unedited", {})] + [(look_id, {"look": {"id": look_id, "strength": LOOK_PROBE_STRENGTH}})
-                                 for look_id in LOOKS]
+                                 for look_id in target_ids]
     jobs += [(PROFILE_KEY + profile_id, {"profile": {"id": profile_id, "amount": PROFILE_PROBE_AMOUNT}})
              for profile_id in PROFILES]
     # One session renders them in turn (the pool's threads queue on it); without one, they render cold in parallel.
@@ -1689,10 +1726,19 @@ _LESSONS = """Lessons from the reference tutorials and from earlier tests on thi
     cyan-blue shadows (hue 200-225) against warm highlights (hue 35-60), at low grading saturation (shadows
     about 8-20, highlights at most about half that); more bleeds into a cast. The brightest whites stay clean:
     a cold white is turned cream, never yellow.
-  * Clarity and texture usually go slightly down (-5..-15 on snow, mist, water, sky, skin). High contrast reads
-    dirty unless the bright zone is softened: a luminance mask on the brights (lo about .65) with clarity
-    -15..-30 and texture -10..-20 leaves the darks crisp. Rugged surfaces (rock, bark, rippled sand) keep a
-    little clarity.
+  * Clarity, texture and crispness: preserve fine subject micro-detail (snow on trees, eyelashes, architecture, metal)
+    with detail.sharpen_amount 32-44 and sharpen_masking 35-60 so smooth skies stay clean. Avoid heavy negative texture
+    (-15..-30) on crisp daylight, snow or architectural scenes (reserve soft negative texture for moody neon, soft skin
+    or vintage glow). For clean blue-hour/firework night scenes, lower saturation before applying blue midtone grading so
+    warm smoke and sparks never split into yellow-to-blue colour banding. High contrast reads dirty unless brights stay
+    clean; rugged surfaces (rock, bark, rippled sand) keep positive clarity.
+  * Atmospheric soft-glow & velvety cinema colour (distilled from master film/drama presets): gentle negative dehaze
+    (-6..-25) creates luminous backlit air, misty softness and filmic highlight bloom in daylight, forest, snow and
+    night lamp scenes; pairing positive vibrance (+20..+50) with negative saturation (-8..-24) builds velvety cinema
+    colour depth without neon clipping; and looks with built-in RGB split curves, global grading and calibrated WB
+    offsets (wong_kar_wai, twilight_blue_drama, k_drama_warm, european_classic, japanese_airy_film, dune_amber)
+    already carry their signature palette — scale intensity with look.strength and keep extra develop.wb gentle so
+    you do not double-push warmth or coolness.
   * Many of his frames are lighter at the top and denser at the bottom: a linear mask from the bottom edge
     (start y=1, end y about .6) at -0.2..-0.5 EV with shadows down, unless the bottom holds the subject.
 - A full histogram is not the goal; the light relationship between subject and surroundings is. The eye should
@@ -1737,8 +1783,10 @@ def _looks_block(measured: dict[str, dict[str, float]] | None = None, image_chro
                  min_distance: float = 5.0, source_kind: str = "jpeg") -> str:
     """The looks for a prompt; ``measured`` (from ``measure_looks``) and image 1's frame colourfulness x100 add
     what each look does to this photo's colour and how far it moves the picture."""
-    notes = {look_id: note for look_id, entry in (measured or {}).items() if (note := _look_note(entry, image_chroma))}
-    lines = look_lines(notes)
+    notes = {look_id: note for look_id, entry in (measured or {}).items()
+             if look_id in LOOKS and (note := _look_note(entry, image_chroma))}
+    measured_looks = [k for k in (measured or {}) if k in LOOKS]
+    lines = look_lines(notes, look_ids=measured_looks or None)
     if not lines:
         return ""
     text = ("LOOKS: palettes distilled from the professional reference preset library (HSL mix, split toning,"
@@ -1815,7 +1863,7 @@ def _profiles_block(measured: dict[str, dict[str, float]] | None, image_chroma: 
     return text + "\n" + "\n".join(f"- {line}" for line in profile_lines(notes))
 
 
-def _source_note(source_kind: str) -> str:
+def _source_note(source_kind: str, negative_meta: dict[str, Any] | None = None) -> str:
     if source_kind == "raw":
         # Placements from the photographer's own finished edits of his RAWs (resources/, 11 before/after pairs;
         # reference benchmark 2026-11-21): ref-r1 kept image 1's grey (snow mid .45 against his .75, dune white
@@ -1916,7 +1964,40 @@ def _source_note(source_kind: str) -> str:
                 " Wider limits for a RAW: shadows"
                 " and mid up to +3.0 EV over image 1, highlights and white +2.6 EV. Highlights recover strongly."
                 " The global wb temp and tint offset is applied to the RAW's own as-shot white balance.")
-    return ("Already-developed JPEG: pure white areas hold no detail (do not try to recover them), and strongly"
+    label = "PNG" if source_kind == "png" else "JPEG"
+    meta = negative_meta or {}
+    if meta.get("has_gain_map"):
+        stops = float(meta.get("gain_map_stops") or 1.5)
+        return (f"HDR Gain Map {label} (reconstructed into a 32-bit linear float working negative with +{stops:.1f} EV"
+                " genuine highlight headroom): bright skies, clouds and lit surfaces carry real recoverable detail"
+                " like a RAW—pull highlights and sculpt local light confidently. Strongly lifted deep shadows still"
+                " benefit from gentle noise control (handled automatically on render).")
+    if meta.get("enabled"):
+        bit = int(meta.get("bit_depth") or 8)
+        blockiness = float(meta.get("jpeg_blockiness") or 0.0)
+        hard_clip = float(meta.get("hard_clip_fraction") or 0.0)
+        reconstructed = float(meta.get("reconstructed_pixels_pct") or 0.0)
+        parts = [
+            f"Pre-conditioned {bit}-bit {label} upgraded to a 32-bit linear float working negative (chroma de-blocked"
+            " and smooth-gradient de-banded"
+            + (f", partial-channel highlight roll-off reconstructed on {reconstructed:.1f}% of bright pixels"
+               if reconstructed >= 0.05 else "")
+            + "): safe for confident tonal hierarchy, colour grading and feathered local dodge-and-burn masks."
+        ]
+        if hard_clip >= 0.015:
+            parts.append(f"Pure 3-channel white plaques ({hard_clip:.1%}) hold no texture—keep them luminous rather"
+                         " than pulling them down into flat grey.")
+        else:
+            parts.append("Highlights have clean headroom; avoid crushing them flat.")
+        if blockiness >= 0.15:
+            parts.append(f"Moderate/strong JPEG compression detected (blockiness {blockiness:.2f}): avoid harsh"
+                         " positive clarity/texture in shadows; adaptive shadow NR and anti-banding are applied"
+                         " automatically on render.")
+        else:
+            parts.append("Adaptive shadow NR is applied automatically whenever darks are lifted significantly;"
+                         " avoid over-sharpening already crisp phone/camera renders.")
+        return " ".join(parts)
+    return (f"Already-developed {label}: pure white areas hold no detail (do not try to recover them), and strongly"
             " lifted shadows reveal noise and banding (add nr_luminance when a dark file is lifted).")
 
 
@@ -1975,18 +2056,106 @@ def _stats_block(stats: dict[str, Any] | None) -> str:
 """
 
 
-# At most this many chosen versions are built on reference looks, so six versions are not six palettes of one picture.
-MAX_LOOK_VERSIONS = 2
+# Portfolio balance for multi-version delivery (fewer heavy stylizations, more versatile light stylizations):
+# - Up to MAX_LOOK_VERSIONS slots may use reference looks, predominantly [轻量风格] at moderate strength.
+# - At most MAX_STRONG_STYLIZED slot across the entire candidate set may carry a heavy/strong stylization;
+#   any extra strong slot proposed by the VLM is deterministically de-escalated into light stylization.
+MAX_LOOK_VERSIONS = 4
+MAX_STRONG_STYLIZED = 1
+LIGHT_LOOK_STRENGTH_CAP = 0.78
+DEMOTED_STRONG_STRENGTH_CAP = 0.45
 # Directions the planner proposed on earlier photos that are offered again, the best-rated first.
 MAX_LEARNED_OFFERED = 8
 # The looks block speaks of the trio's C; with chosen directions it speaks of any colour version.
 _LOOKS_FOR_CHOSEN = {
-    "Version C should normally use one": "Every colour direction (palette, look:<id>) uses one",
-    "A and B normally use no look": "A and the light directions normally use no look",
+    "Version C should normally use one": "Light colour directions (subtle_film, look:<light_id>) use a [轻量风格] look at 0.45-0.75; at most one strong direction uses a [强风格] look",
+    "A and B normally use no look": "A and pure-light directions (clean_tone, airy, dramatic) normally use no look",
     "write C's chroma": "write a colour version's chroma",
     "C's tone usually sits near A's": "A colour version's tone usually sits near A's",
     "make C visibly different from A: then give C its own": "make it visibly different from A: then give it its own",
 }
+
+
+def is_strong_plan(plan: dict[str, Any], direction: dict[str, Any] | None = None) -> bool:
+    """True when a version carries a bold/heavy stylization rather than natural or light polish."""
+    look = plan.get("look") or {}
+    lid = look.get("id")
+    strength = float(look.get("strength", 0.8)) if lid else 0.0
+    if lid and is_strong_look(lid) and strength > 0.52:
+        return True
+    dev = plan.get("develop") or {}
+    wb = dev.get("wb") or {}
+    if abs(float(wb.get("temp", 0.0))) >= 1100.0 or abs(float(wb.get("tint", 0.0))) >= 16.0:
+        return True
+    glob = (dev.get("grading") or {}).get("global") or {}
+    if float(glob.get("sat", 0.0)) >= 20.0:
+        return True
+    dir_id = str((direction or {}).get("id") or "")
+    if dir_id == "palette" and (not lid or strength >= 0.82):
+        return True
+    return False
+
+
+def _rebalance_stylization(plans: dict[str, dict[str, Any]], directions: dict[str, dict[str, Any]],
+                           notes: dict[str, list[str]], weights: dict[str, float] | None = None) -> None:
+    """Enforce the light-stylization-first portfolio policy deterministically on multi-version plans.
+
+    - Keeps at most ``MAX_STRONG_STYLIZED`` (1) strongly stylized candidate slot (preferring the one
+      with highest learned user preference weight, or the earliest non-A slot on ties).
+    - Automatically de-escalates any 2nd+ strong-stylized slot into a restrained light-stylized version
+      (look strength capped to ``DEMOTED_STRONG_STRENGTH_CAP`` and extreme WB/global grading moderated).
+    - Keeps ``light``-tier looks at tasteful moderate strength (``<= LIGHT_LOOK_STRENGTH_CAP``) so
+      lightly stylized versions stay clean, versatile, and free of heavy-filter cast.
+    """
+    weights = weights or {}
+    non_a = [s for s in sorted(plans) if s != "A"]
+    strong_slots = [s for s in non_a if is_strong_plan(plans[s], directions.get(s))]
+
+    # Keep only the top MAX_STRONG_STYLIZED strong slot(s); rank by learned weight, then slot order.
+    keep_strong: set[str] = set()
+    if strong_slots:
+        ranked_strong = sorted(
+            strong_slots,
+            key=lambda s: (-float(weights.get((directions.get(s) or {}).get("id", ""), 1.0)), s),
+        )
+        keep_strong = set(ranked_strong[:MAX_STRONG_STYLIZED])
+
+    for slot in non_a:
+        plan = plans[slot]
+        look = plan.get("look")
+        if slot in strong_slots and slot not in keep_strong:
+            # De-escalate excess strong stylization into tasteful lightweight stylization
+            changed = []
+            if isinstance(look, dict) and look.get("id"):
+                old_s = float(look.get("strength", 0.8))
+                if old_s > DEMOTED_STRONG_STRENGTH_CAP:
+                    look["strength"] = DEMOTED_STRONG_STRENGTH_CAP
+                    changed.append(f"风格强度 {old_s:.2f} → {DEMOTED_STRONG_STRENGTH_CAP:.2f}")
+            dev = plan.get("develop") or {}
+            wb = dev.get("wb") or {}
+            if abs(float(wb.get("temp", 0.0))) > 600.0:
+                wb["temp"] = round(max(-600.0, min(600.0, float(wb["temp"]))), 1)
+                changed.append(f"白平衡色温收敛至 {wb['temp']:+.0f}K")
+            if abs(float(wb.get("tint", 0.0))) > 10.0:
+                wb["tint"] = round(max(-10.0, min(10.0, float(wb["tint"]))), 1)
+                changed.append(f"白平衡色调收敛至 {wb['tint']:+.0f}")
+            glob = (dev.get("grading") or {}).get("global") or {}
+            if float(glob.get("sat", 0.0)) > 12.0:
+                glob["sat"] = 12.0
+                changed.append("全局染色饱和收敛至 12")
+            if changed:
+                notes.setdefault(slot, []).append(
+                    f"风格化配额控制（全组最多保留 {MAX_STRONG_STYLIZED} 套强风格，其余转为轻量风格化）："
+                    + "、".join(changed)
+                )
+        elif slot not in keep_strong and isinstance(look, dict) and look.get("id") and not is_strong_look(look["id"]):
+            # Keep light-tier looks refined and versatile rather than pushing them to 1.0 heavy filter
+            old_s = float(look.get("strength", 0.7))
+            if old_s > LIGHT_LOOK_STRENGTH_CAP:
+                look["strength"] = LIGHT_LOOK_STRENGTH_CAP
+                notes.setdefault(slot, []).append(
+                    f"轻量风格化收敛：{look['id']} 强度由 {old_s:.2f} 调整为 {LIGHT_LOOK_STRENGTH_CAP:.2f} 以保持自然耐看"
+                )
 
 
 def _library_text(library: dict[str, experience.Direction], weights: dict[str, float] | None = None) -> str:
@@ -2014,8 +2183,17 @@ def _design_text(slots: list[str], library: dict[str, experience.Direction], exp
             f"   For each of {others} choose a direction from the library below, for a reason you can see in this"
             " picture (its elements, light and mood). A direction that does not suit this picture is not chosen"
             " (dramatic light on a flat frame with nothing to sculpt, a snow palette on a desert). Use each direction"
-            f" once, build at most {MAX_LOOK_VERSIONS} versions on looks (look:<id>), and mix light directions with"
-            " colour directions. When this picture clearly calls for something no direction gives, propose a new"
+            " once.\n"
+            "   STYLIZATION PORTFOLIO RULE (IMPORTANT — MORE LIGHT STYLIZATION, FEWER HEAVY FILTERS):\n"
+            f"   - Make the MAJORITY of {others} subtle, everyday-deliverable LIGHT stylizations and clean light"
+            " refinements: prefer clean_tone, airy, subtle_film, and [轻量风格] looks at moderate strength 0.45-0.75"
+            " (visibly refined over A, with natural skin and clean whites).\n"
+            f"   - Include AT MOST {MAX_STRONG_STYLIZED} strongly stylized version ([强风格] look or bold heavy"
+            " colour/mood shift) across the entire set—and ONLY if the photo genuinely suits it. Never flood"
+            " multiple slots with heavy colour casts.\n"
+            f"   - Build at most {MAX_LOOK_VERSIONS} versions on looks (look:<id>), mixing light-sculpting directions"
+            " with restrained colour directions.\n"
+            "   When this picture clearly calls for something no direction gives, propose a new"
             " one instead: \"id\": \"new\" with a short Chinese \"title\", a \"role\" written like the roles below"
             " and \"look\" (a look id or null). Write each version's plan to its direction's role, and keep each plan"
             " compact (intent and mask purposes in a short sentence) so all of them fit in one answer.\n"
@@ -2029,7 +2207,8 @@ def plan_prompt(technical: Any, size: tuple[int, int], stats: dict[str, Any] | N
                 looks: dict[str, dict[str, float]] | None = None, min_distance: float = 5.0, *,
                 slots: list[str] | None = None, library: dict[str, experience.Direction] | None = None,
                 experience_text: str = "", weights: dict[str, float] | None = None,
-                elements: dict[str, Any] | None = None) -> str:
+                elements: dict[str, Any] | None = None,
+                negative_meta: dict[str, Any] | None = None) -> str:
     """The planning prompt. Without ``library`` it asks for the classic trio A/B/C; with it, for ``slots`` versions
     whose directions (after the natural A) the planner chooses, given ``experience_text`` (experience_block)."""
     measurements = _measurements(technical)
@@ -2086,7 +2265,7 @@ File measurements (not artistic targets): {json.dumps(measurements, ensure_ascii
 {looks_text}
 
 {_LESSONS}
-- {"The RAW development note at the top applies to everything above." if raw else _source_note(source_kind)}
+- {"The RAW development note at the top applies to everything above." if raw else _source_note(source_kind, negative_meta)}
 - Never invent or remove content. No crop.
 
 Return JSON only. All human-readable text in Chinese:
@@ -2768,7 +2947,8 @@ def plan_versions(settings: Settings, selection: dict[str, Any], baseline: Image
                   technical: Any, looks: dict[str, dict[str, float]] | None = None, *,
                   slots: list[str] | None = None, library: dict[str, experience.Direction] | None = None,
                   experience_text: str = "", weights: dict[str, float] | None = None,
-                  elements: dict[str, Any] | None = None) -> dict[str, Any]:
+                  elements: dict[str, Any] | None = None,
+                  negative_meta: dict[str, Any] | None = None) -> dict[str, Any]:
     """Ask the vision model to read the baseline and write the plans.
 
     ``looks`` (from ``measure_looks``) gives what each look does to this photo. Without ``library`` it writes the
@@ -2781,7 +2961,7 @@ def plan_versions(settings: Settings, selection: dict[str, Any], baseline: Image
     stats = picture_stats(baseline)
     prompt = plan_prompt(technical, baseline.size, stats, looks, settings.lightroom_candidate_min_distance,
                          slots=slots if choose else None, library=library, experience_text=experience_text,
-                         weights=weights, elements=elements)
+                         weights=weights, elements=elements, negative_meta=negative_meta)
     again = _PLANS_AGAIN.format(chosen=', "directions"' if choose else "", keys=_keys_text(slots))
     images = [_b64(baseline), _b64(grid_overlay(baseline))]
     plans: dict[str, dict[str, Any]] = {}
@@ -2845,6 +3025,7 @@ def plan_versions(settings: Settings, selection: dict[str, Any], baseline: Image
         directions, direction_notes = _chosen_directions(directions_raw, plans, library)
         for slot, extra in direction_notes.items():
             notes.setdefault(slot, []).extend(extra)
+        _rebalance_stylization(plans, directions, notes, weights)
     else:
         directions = _trio_directions(plans)
     provider = provider_from(selection, (audit.get("calls") or [{}])[-1])
@@ -3209,6 +3390,8 @@ class _Context:
     looks: dict[str, dict[str, float]] = field(default_factory=dict)   # measure_looks: what each look does here
     prompt: str = ""                                                    # the planning prompt, for re-planning
     roles: dict[str, str] = field(default_factory=dict)                 # slot -> its direction's role
+    render_source: Path | None = None                                   # conditioned 32-bit float negative for JPG/PNG
+    negative_meta: dict[str, Any] | None = None
 
 
 def color_sampler(binary: Path, source: Path) -> Callable[[list[dict[str, float]]], list[list[float]]]:
@@ -3245,10 +3428,76 @@ def _aspect_of(image: Image.Image | Path) -> float | None:
     return width / height if width > 0 and height > 0 else None
 
 
+def _smooth_mask_contour_score(baseline: Image.Image | Path, rendered: Path) -> float:
+    """Percent of smooth baseline pixels that gained a sharp spurious edge in ``rendered``.
+
+    Catches hard binary contour islands created when a tight luminanceRange mask cuts
+    across smooth skin, studio backdrops, or skies (e.g. hi_feather compressed to ~0.02
+    after positive global exposure).
+    """
+    b = tone.load_small(baseline, 640)
+    r = tone.load_small(rendered, 640)
+    if b.shape != r.shape:
+        with Image.open(rendered) as opened:
+            im = ImageOps.exif_transpose(opened).convert("RGB").resize((b.shape[1], b.shape[0]), Image.Resampling.BILINEAR)
+            r = np.asarray(im, dtype=np.float32) / 255.0
+
+    def _grad(arr: np.ndarray) -> np.ndarray:
+        # 3x3 mean suppresses high-frequency film grain while keeping macroscopic mask-contour edges sharp.
+        p = np.pad(arr, ((1, 1), (1, 1), (0, 0)), mode="edge")
+        sm = (p[:-2, :-2] + p[:-2, 1:-1] + p[:-2, 2:] +
+              p[1:-1, :-2] + p[1:-1, 1:-1] + p[1:-1, 2:] +
+              p[2:, :-2] + p[2:, 1:-1] + p[2:, 2:]) / 9.0
+        gx = np.abs(np.diff(sm, axis=1, append=sm[:, -1:, :])).max(axis=-1)
+        gy = np.abs(np.diff(sm, axis=0, append=sm[-1:, :, :])).max(axis=-1)
+        return np.hypot(gx, gy)
+
+    gb, gr = _grad(b), _grad(r)
+    smooth = gb < 0.018
+    if not np.any(smooth):
+        return 0.0
+    spurious = smooth & (gr > 0.024) & (gr > gb * 2.8)
+    return round(float(np.mean(spurious)) * 100.0, 4)
+
+
+def _soften_tight_range_masks(document: dict[str, Any], *, min_feather: float = 0.14) -> dict[str, Any] | None:
+    """Widen tight luminanceRange feathers and colorRange falloff that slice smooth gradients."""
+    masks = document.get("masks")
+    if not isinstance(masks, list) or not masks:
+        return None
+    softened = copy.deepcopy(document)
+    changed = False
+    for mask in softened.get("masks") or []:
+        if not isinstance(mask, dict):
+            continue
+        for comp in mask.get("components") or []:
+            shape = comp.get("shape") if isinstance(comp, dict) else None
+            if not isinstance(shape, dict):
+                continue
+            kind = shape.get("kind")
+            if kind == "luminanceRange":
+                lo = float(shape.get("lo", 0.0))
+                hi = float(shape.get("hi", 1.0))
+                if lo > 0.0 and float(shape.get("lo_feather", 0.0)) < min_feather:
+                    shape["lo_feather"] = round(min_feather, 4)
+                    changed = True
+                if hi < 1.0 and float(shape.get("hi_feather", 0.0)) < min_feather:
+                    shape["hi_feather"] = round(min_feather, 4)
+                    changed = True
+            elif kind == "colorRange" and float(shape.get("refine", 100.0)) < 75.0:
+                shape["refine"] = 75.0
+                changed = True
+    return softened if changed else None
+
+
+MASK_CONTOUR_THRESHOLD = 0.08
+
+
 def _render_plan(binary: Path, source: Path, plan: dict[str, Any], source_kind: str, out_dir: Path, *,
                  edge: int, colors: Callable | None, final_name: str | None = None,
                  baseline: dict[str, float] | None = None, neutral_reference: Path | None = None,
-                 image: Image.Image | Path | None = None, aspect: float | None = None
+                 image: Image.Image | Path | None = None, aspect: float | None = None,
+                 negative_meta: dict[str, Any] | None = None,
                  ) -> tuple[dict[str, Any], dict[str, Any], list[str], dict[str, Any] | None, Path]:
     """Solve a plan with small probe renders, then render it at delivery size.
 
@@ -3257,7 +3506,7 @@ def _render_plan(binary: Path, source: Path, plan: dict[str, Any], source_kind: 
     off the near-neutral cast gate. ``image`` (image 1), given, lets ``guard_spill`` narrow a lifting
     mask's luminance limit first. ``aspect`` (width / height) sizes radials; it defaults to image 1's.
     The delivered render of a RAW shot at high ISO or lifted hard gets LightCraft AI Denoise (denoise.decide);
-    the returned document carries it only when the render was denoised.
+    an ordinary JPEG/PNG whose shadows are lifted gets adaptive NR + anti-banding protection.
     """
     from . import denoise
     from .lightcraft import render_document, render_session
@@ -3274,19 +3523,47 @@ def _render_plan(binary: Path, source: Path, plan: dict[str, Any], source_kind: 
 
     spill_notes: list[str] = []
     spill: list[dict[str, Any]] = []
+    protection: dict[str, Any] | None = None
     with render_session(binary, source):   # The spill and solver probes and the final render: one decode.
         if image is not None:
             plan, spill_notes, spill = guard_spill(plan, source_kind, renderer("spill"), image, colors=colors)
         neutral = (neutral_guard(neutral_reference, RAW_NEUTRAL_GATE if source_kind == "raw" else 1.0)
                    if neutral_reference is not None and neutral_reference.is_file() else None)
         executed, document, notes, solve = solve_plan(plan, source_kind, renderer("probes"), colors=colors,
-                                                      baseline=baseline, neutral=neutral, aspect=aspect)
+                                                      baseline=baseline, neutral=neutral, aspect=aspect,
+                                                      negative_meta=negative_meta)
         if spill and solve is not None:
             solve["spill"] = spill
         decision = denoise.decide(source, source_kind, document)
         final = denoise.with_denoise(document, decision["amount"]) if decision else document
+        if not decision and source_kind in {"jpeg", "png"}:
+            protection = denoise.raster_protection(final, source_kind, negative_meta)
+            if protection:
+                final = denoise.with_raster_protection(final, protection)
+            # High-banding-risk 8-bit portraits/skies cannot tolerate razor-thin luminanceRange
+            # cutoffs compressed by positive global exposure: ensure smooth feathering up front.
+            if float((negative_meta or {}).get("banding_risk") or 0.0) >= 0.35:
+                softened_upfront = _soften_tight_range_masks(final, min_feather=0.12)
+                if softened_upfront is not None:
+                    final = softened_upfront
         render = render_document(binary, source, final, out_dir / final_name if final_name else out_dir,
                                  edge=edge)
+        healed_contour: tuple[float, float] | None = None
+        if image is not None and not decision:
+            try:
+                before_contour = _smooth_mask_contour_score(image, render)
+                if before_contour >= MASK_CONTOUR_THRESHOLD:
+                    softened = _soften_tight_range_masks(final)
+                    if softened is not None:
+                        trial = render_document(binary, source, softened, out_dir / "contour-heal", edge=PROBE_EDGE)
+                        after_contour = _smooth_mask_contour_score(image, trial)
+                        if after_contour <= before_contour * 0.65:
+                            final = softened
+                            render = render_document(binary, source, final,
+                                                     out_dir / final_name if final_name else out_dir, edge=edge)
+                            healed_contour = (before_contour, after_contour)
+            except (OSError, ValueError):
+                pass
     if decision:
         if denoise.recorded(render.parent):
             document = final
@@ -3294,6 +3571,15 @@ def _render_plan(binary: Path, source: Path, plan: dict[str, Any], source_kind: 
                              f"{decision['stops']:.1f} 档，等效 ISO {decision['effective_iso']:g}）"]
         else:
             notes = [*notes, "AI 降噪没有生效（只支持 Bayer 传感器的 RAW，或 LightCraft 无法打开降噪图库），按未降噪导出"]
+    elif protection:
+        document = final
+        grain_note = f" / 防断层微颗粒 {protection['grain']:g}" if protection.get("grain") else ""
+        notes = [*notes, f"JPG/PNG 暗部保护：亮度降噪 {protection['nr_luminance']:g} / "
+                         f"色彩降噪 {protection['nr_color']:g}{grain_note}（暗部提亮约 {protection['stops']:.1f} 档）"]
+    if healed_contour:
+        document = final
+        notes = [*notes, f"蒙版边缘自愈：检测到平滑区域出现蒙版断层（{healed_contour[0]:.2f}% → "
+                         f"{healed_contour[1]:.2f}%），已自动加大亮度蒙版羽化重渲"]
     return executed, document, spill_notes + notes, solve, render
 
 
@@ -3302,9 +3588,10 @@ def _first_round(ctx: _Context, slot: str, plan: dict[str, Any], plan_notes: lis
     from .lightcraft import LightCraftError
 
     folder = ctx.root / "directed" / slot
-    source = folder / f"source{ctx.original.suffix.lower()}"
+    render_input = ctx.render_source if ctx.render_source is not None and ctx.render_source.is_file() else ctx.original
+    source = folder / f"source{render_input.suffix.lower()}"
     folder.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(ctx.original, source)
+    shutil.copy2(render_input, source)
     try:
         current = _make_round(ctx, slot, 0, plan, plan_notes, source)
     except LightCraftError as exc:
@@ -3319,7 +3606,7 @@ def _make_round(ctx: _Context, slot: str, index: int, plan: dict[str, Any], plan
         ctx.binary, source, plan, ctx.source_kind, out_dir, edge=ctx.settings.lightroom_export_edge, colors=ctx.colors,
         baseline=(ctx.baseline_stats or {}).get("anchors"),
         neutral_reference=ctx.baseline_export if slot == "A" else None,   # The gate's natural_color versions.
-        image=ctx.baseline_image)
+        image=ctx.baseline_image, negative_meta=ctx.negative_meta)
     gate = safety_gate(ctx.baseline_export, render, slot, ctx.source_kind)
     return _Round(index, executed, plan_notes, document, notes, render, gate, solve=solve)
 
@@ -3469,6 +3756,23 @@ def run_directed_job(settings: Settings, conn: sqlite3.Connection, job_id: str, 
     source_kind = str(getattr(technical, "source_kind", "jpeg"))
     baseline_image = load_preview(baseline_export)
     directed_root = root / "directed"
+    render_source = original
+    negative_meta: dict[str, Any] | None = None
+    if settings.raster_negative_enabled and source_kind in {"jpeg", "png"} and original.is_file():
+        try:
+            from .raster_negative import prepare_raster_negative
+
+            neg_path = root / "working_negative.tif"
+            negative_meta = prepare_raster_negative(
+                original, neg_path, max_edge=max(settings.lightroom_export_edge, 3200)
+            )
+            (root / "negative.json").write_text(
+                json.dumps(negative_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            render_source = neg_path
+        except Exception:
+            negative_meta = None
+            render_source = original
     looks = measure_looks(binary, original, directed_root / "looks", source_kind)
     # The elements are read first so that what this user picked on similar pictures is in view when the
     # directions are chosen; the trio (directed_versions 3) keeps its fixed directions and only records them.
@@ -3481,9 +3785,11 @@ def run_directed_job(settings: Settings, conn: sqlite3.Connection, job_id: str, 
     planning = plan_versions(settings, selection, baseline_image, technical, looks,
                              slots=list(ALL_SLOTS[:settings.directed_versions]) if choose else None,
                              library=library if choose else None, experience_text=experience_text,
-                             weights=weights, elements=elements)
+                             weights=weights, elements=elements, negative_meta=negative_meta)
     prompt = planning.pop("_prompt", "")
     planning["experience"] = {"profile": scene, "used": bool(experience_text), "chars": len(experience_text)}
+    if negative_meta:
+        planning["raster_negative"] = negative_meta
     planning.setdefault("audit", {})["elements"] = elements.get("audit")
     directed_root.mkdir(parents=True, exist_ok=True)
     (directed_root / "plan.json").write_text(json.dumps(planning, ensure_ascii=False, indent=2, default=str),
@@ -3495,8 +3801,9 @@ def run_directed_job(settings: Settings, conn: sqlite3.Connection, job_id: str, 
     directions = planning["directions"]
     ctx = _Context(settings, selection, binary, root, original, baseline_export, baseline_image,
                    planning["reading"], source_kind, baseline_stats=planning.get("baseline_stats"),
-                   colors=color_sampler(binary, original), looks=looks, prompt=prompt,
-                   roles={slot: item["role"] for slot, item in directions.items()})
+                   colors=color_sampler(binary, render_source), looks=looks, prompt=prompt,
+                   roles={slot: item["role"] for slot, item in directions.items()},
+                   render_source=render_source, negative_meta=negative_meta)
     slots = [slot for slot in planning["slots"] if slot in planning["plans"]]
     with ThreadPoolExecutor(max_workers=min(len(slots), RENDER_WORKERS)) as pool:
         # First renders of all versions, so each reviewer knows how far its version is from the others.
@@ -3531,9 +3838,11 @@ def run_directed_job(settings: Settings, conn: sqlite3.Connection, job_id: str, 
                  "rounds": result["rounds"]}, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
             continue
         finals[slot] = result
-    # The versions this user is likelier to keep on a picture like this come first (A first on a tie).
+    # The versions this user is likelier to keep on a picture like this come first; on equal weight,
+    # natural & lightly stylized options appear ahead of any strong stylization (A first on a tie).
     slot_weights = {slot: weights.get(directions[slot]["id"], 1.0) for slot in finals}
-    order = experience.display_order(slot_weights)
+    strong_slots = {slot for slot, res in finals.items() if slot != "A" and is_strong_plan(res["best"].plan, directions.get(slot))}
+    order = experience.display_order(slot_weights, strong_slots=strong_slots)
     for slot, result in finals.items():
         best: _Round = result["best"]
         direction = directions[slot]
@@ -3562,6 +3871,7 @@ def run_directed_job(settings: Settings, conn: sqlite3.Connection, job_id: str, 
             "intent": intent.model_dump(),
             "style_workflow": {"method_id": experience.METHOD_PREFIX + direction["id"],
                                "preset_id": (best.plan.get("look") or {}).get("id"), "mode": "art-directed",
+                               "stylization_tier": ("natural" if slot == "A" else ("strong" if slot in strong_slots else "light")),
                                "route_label": best.plan["title"], "direction_title": direction["title"],
                                "selection_reason": reason, "adaptation_notes": moves, "manual_gaps": []},
             "experience": experience.sidecar_block(scene, direction, reason, best.render,
@@ -3577,7 +3887,8 @@ def run_directed_job(settings: Settings, conn: sqlite3.Connection, job_id: str, 
                          "compile_notes": best.compile_notes, "plan_notes": best.plan_notes,
                          "gate_advisory": best.gate["advisory"], "tone": best.solve,
                          "vision_provider": planning.get("provider"),
-                         "temporary_provider": planning.get("temporary_provider", False)},
+                         "temporary_provider": planning.get("temporary_provider", False),
+                         "raster_negative": negative_meta},
             "candidate_selection": selection_info,
         }
         (root / f"variant_{slot}.json").write_text(json.dumps(sidecar, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -3696,11 +4007,25 @@ def run_refinement(settings: Settings, conn: sqlite3.Connection, refinement_id: 
         raise ValueError("原片已不在本机，无法继续微调。")
     source = folder / f"source{original.suffix.lower()}"
     shutil.copy2(original, source)
+    render_source = source
+    negative_meta: dict[str, Any] | None = None
+    job_root = settings.jobs_dir / record["job_id"]
+    neg_tif = job_root / "working_negative.tif"
+    neg_json = job_root / "negative.json"
+    if settings.raster_negative_enabled and base["source_kind"] in {"jpeg", "png"} and neg_tif.is_file():
+        render_source = folder / "source_negative.tif"
+        shutil.copy2(neg_tif, render_source)
+        if neg_json.is_file():
+            try:
+                negative_meta = json.loads(neg_json.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                negative_meta = None
     client, _status = connect_lightroom(settings.lightcraft_bin)
     binary = Path(client.binary)
     plan, document, compile_notes, solve, output = _render_plan(
-        binary, source, plan, base["source_kind"], folder, edge=settings.lightroom_export_edge,
-        colors=color_sampler(binary, source), final_name="exports", aspect=_aspect_of(before))
+        binary, render_source, plan, base["source_kind"], folder, edge=settings.lightroom_export_edge,
+        colors=color_sampler(binary, render_source), final_name="exports", aspect=_aspect_of(before),
+        negative_meta=negative_meta)
     audit.update(engine=ENGINE, base_image=str(before), base_plan=base["plan"], plan=plan, plan_notes=notes,
                  compile_notes=compile_notes, document=document, tone=solve, vision=vision_audit)
     update_refinement(conn, refinement_id, step="qa")

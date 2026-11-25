@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     # Denoised raw data kept under data/denoise for later renders and full-size exports (about 150 MB per 45 MP
     # photo); the least recently used goes first.
     ai_denoise_cache_gb: float = Field(default=4.0, ge=0, le=500)
+    # Pre-condition ordinary JPEG/PNG inputs into a 32-bit linear float working negative (chroma de-blocking,
+    # smooth-gradient de-banding, partial-channel highlight reconstruction, and ISO 21496-1 Gain Map recovery).
+    raster_negative_enabled: bool = True
     lightroom_qa_min_score: float = 82.0
     lightroom_qa_max_refinements: int = 2
     lightroom_candidate_min_distance: float = 5.0

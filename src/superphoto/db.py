@@ -69,6 +69,34 @@ def init_db(conn: sqlite3.Connection) -> None:
             origin_job TEXT,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS style_batches (
+            id TEXT PRIMARY KEY,
+            source_job_id TEXT NOT NULL REFERENCES jobs(id),
+            source_slot TEXT NOT NULL,
+            source_version TEXT,
+            title TEXT NOT NULL,
+            profile_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            total_count INTEGER NOT NULL,
+            done_count INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS style_batch_items (
+            id TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL REFERENCES style_batches(id),
+            original_name TEXT NOT NULL,
+            original_file TEXT NOT NULL,
+            status TEXT NOT NULL,
+            step TEXT NOT NULL,
+            error TEXT,
+            output_filename TEXT,
+            develop_json TEXT,
+            metrics_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         """
     )
     _widen_slots(conn)
@@ -112,7 +140,8 @@ _REFINEMENTS = """
 _INDEXES = """
         CREATE INDEX IF NOT EXISTS refinements_job ON refinements(job_id, created_at);
         CREATE UNIQUE INDEX IF NOT EXISTS refinements_one_active
-            ON refinements(job_id, slot) WHERE status IN ('queued', 'running');"""
+            ON refinements(job_id, slot) WHERE status IN ('queued', 'running');
+        CREATE INDEX IF NOT EXISTS style_batch_items_batch ON style_batch_items(batch_id, created_at);"""
 
 
 def _widen_slots(conn: sqlite3.Connection) -> None:
@@ -316,4 +345,97 @@ def update_refinement(conn: sqlite3.Connection, refinement_id: str, **fields: An
     fields["updated_at"] = utcnow()
     conn.execute(f"UPDATE refinements SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
                  [*fields.values(), refinement_id])
+    conn.commit()
+
+
+def insert_style_batch(conn: sqlite3.Connection, batch_id: str, source_job_id: str, source_slot: str,
+                       source_version: str | None, title: str, profile: dict[str, Any], total_count: int) -> None:
+    now = utcnow()
+    conn.execute(
+        """INSERT INTO style_batches
+           (id, source_job_id, source_slot, source_version, title, profile_json, status,
+            total_count, done_count, error_count, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, 0, 0, ?, ?)""",
+        (batch_id, source_job_id, source_slot, source_version, title,
+         json.dumps(profile, ensure_ascii=False), int(total_count), now, now),
+    )
+    conn.commit()
+
+
+def insert_style_batch_item(conn: sqlite3.Connection, item_id: str, batch_id: str,
+                            original_name: str, original_file: str) -> None:
+    now = utcnow()
+    conn.execute(
+        """INSERT INTO style_batch_items
+           (id, batch_id, original_name, original_file, status, step, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'queued', 'queued', ?, ?)""",
+        (item_id, batch_id, original_name, original_file, now, now),
+    )
+    conn.commit()
+
+
+def get_style_batch(conn: sqlite3.Connection, batch_id: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM style_batches WHERE id = ?", (batch_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_style_batches(conn: sqlite3.Connection, *, source_job_id: str | None = None,
+                       limit: int = 20) -> list[dict[str, Any]]:
+    if source_job_id:
+        rows = conn.execute(
+            "SELECT * FROM style_batches WHERE source_job_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            (source_job_id, int(limit)),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM style_batches ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_style_batch_item(conn: sqlite3.Connection, item_id: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM style_batch_items WHERE id = ?", (item_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_style_batch_items(conn: sqlite3.Connection, batch_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT * FROM style_batch_items WHERE batch_id = ? ORDER BY created_at, rowid",
+        (batch_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_style_batch_item(conn: sqlite3.Connection, item_id: str, **fields: Any) -> None:
+    allowed = {"status", "step", "error", "output_filename", "develop_json", "metrics_json"}
+    if not fields.keys() <= allowed:
+        raise ValueError("Unknown style_batch_items field")
+    fields["updated_at"] = utcnow()
+    conn.execute(f"UPDATE style_batch_items SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
+                 [*fields.values(), item_id])
+    conn.commit()
+
+
+def refresh_style_batch_counts(conn: sqlite3.Connection, batch_id: str) -> None:
+    rows = conn.execute("SELECT status FROM style_batch_items WHERE batch_id = ?", (batch_id,)).fetchall()
+    statuses = [r["status"] for r in rows]
+    total = len(statuses)
+    done = sum(1 for s in statuses if s == "ready")
+    err = sum(1 for s in statuses if s == "error")
+    running = any(s == "running" for s in statuses)
+    queued = any(s == "queued" for s in statuses)
+    if running:
+        status = "running"
+    elif queued:
+        status = "running" if (done or err) else "queued"
+    elif total > 0 and done == 0 and err == total:
+        status = "error"
+    else:
+        status = "ready"
+    conn.execute(
+        """UPDATE style_batches SET status = ?, total_count = ?, done_count = ?, error_count = ?, updated_at = ?
+           WHERE id = ?""",
+        (status, total, done, err, utcnow(), batch_id),
+    )
     conn.commit()

@@ -14,7 +14,12 @@ const state = {
   drafts: {},
   lightcraftEnabled: null,
   previewUrl: null,
+  syncFiles: [],
+  syncBatchId: null,
+  syncPoll: null,
+  syncBatches: [],
 };
+window.SuperPhotoState = state;
 
 const STEP_COPY = {
   queued: "排队",
@@ -114,6 +119,12 @@ function bind() {
       <button type="button" data-full="tiff" title="原尺寸 16 位 TIFF，适合继续精修；文件很大">16 位 TIFF</button>
     </div>
     <p class="feedback-hint" id="full-status" role="status" aria-live="polite"></p>
+    <div class="sync-entry" id="sync-entry">
+      <button type="button" class="btn ghost" id="sync-open"><span>批量套用到同组照片</span><span aria-hidden="true">↗</span></button>
+      <p class="feedback-hint" id="sync-entry-hint">把当前成片的色调与氛围统一到同一批拍摄的其他 RAW / JPG / PNG，每张自动适配曝光与冷暖。</p>
+    </div>
+      <p class="feedback-hint">自动提取原片机型、光圈、快门与 ISO 生成摄影水印，或拼图预览朋友圈九宫格。</p>
+    </div>
     <div class="refine-section">
       <label for="notes">还想做一点调整？</label>
       <textarea id="notes" rows="4" maxlength="1000" placeholder="说说你想要的效果，例如：主体亮一点，保留现在的暖色。"></textarea>
@@ -128,6 +139,7 @@ function bind() {
   $("vision-open").addEventListener("click", openVisionDialog);
   $("vision-close").addEventListener("click", () => $("vision-dialog").close());
   $("vision-dialog").addEventListener("close", () => { $("vision-body").innerHTML = ""; refreshHealth(); });
+  bindStyleSync();
   $("view-single").addEventListener("click", () => setCompareView(false));
   $("view-compare").addEventListener("click", () => setCompareView(true));
   ["edit", "info"].forEach(name => {
@@ -196,6 +208,7 @@ function bind() {
   });
   bindHoldOrig();
   document.addEventListener("keydown", (e) => {
+    if (document.querySelector("dialog[open]")) return;
     if (e.target.closest("input, textarea, select, [contenteditable='true']")) return;
     if (!$("result-stage") || $("result-stage").classList.contains("hidden")) return;
     // Number keys pick the cards in the order they are shown (best-matching first), not by letter.
@@ -207,6 +220,7 @@ function bind() {
     }
   });
   document.addEventListener("keyup", (e) => {
+    if (document.querySelector("dialog[open]")) return;
     if (e.target.closest("input, textarea, select, button, [contenteditable='true']")) return;
     if (e.key === " " || e.code === "Space") showHeroEdit();
   });
@@ -663,6 +677,7 @@ function updateFullExport() {
   // The base mode keeps no LightCraft develop record, so there is nothing to render at full size.
   const unavailable = state.lightcraftEnabled === false;
   $("full-export").hidden = unavailable;
+  if ($("sync-entry")) $("sync-entry").hidden = unavailable;
   const busy = state.fullExport && !state.fullExport.done;
   document.querySelectorAll("[data-full]").forEach(button => button.disabled = Boolean(busy));
   if (unavailable) { $("full-status").textContent = ""; return; }
@@ -1301,4 +1316,253 @@ function renderPassphraseForm(body) {
     } catch (err) { visionFail(err); }
   };
   body.appendChild(form);
+}
+
+// ---- Series Style Sync (同风格批量套用) -------------------------------------
+
+function bindStyleSync() {
+  const openBtn = $("sync-open");
+  if (!openBtn) return;
+  openBtn.addEventListener("click", openStyleSyncDialog);
+  $("sync-close").addEventListener("click", () => $("sync-dialog").close());
+  $("sync-dialog").addEventListener("close", () => clearTimeout(state.syncPoll));
+
+  const drop = $("sync-drop");
+  const input = $("sync-files");
+  $("sync-pick").addEventListener("click", (e) => { e.stopPropagation(); input.click(); });
+  drop.addEventListener("click", () => input.click());
+  drop.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); }
+  });
+  ["dragenter", "dragover"].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", (e) => setSyncFiles(Array.from(e.dataTransfer.files || [])));
+  input.addEventListener("change", () => setSyncFiles(Array.from(input.files || [])));
+
+  $("sync-strength").addEventListener("input", () => {
+    $("sync-strength-val").textContent = `${$("sync-strength").value}%`;
+  });
+  $("sync-start").addEventListener("click", submitStyleSync);
+}
+
+function setSyncFiles(files) {
+  state.syncFiles = files;
+  $("sync-error").textContent = "";
+  const hint = $("sync-picked-hint");
+  if (!files.length) {
+    hint.textContent = "系统会提取当前成片的色彩科学、影调与氛围，并为每张照片独立计算最佳曝光与冷暖，无需等待视觉模型重跑。";
+    $("sync-start").disabled = true;
+    $("sync-start").textContent = "开始统一风格 ↗";
+    return;
+  }
+  const names = files.slice(0, 4).map(f => f.name).join("、") + (files.length > 4 ? ` 等 ${files.length} 张` : "");
+  hint.textContent = `已选 ${files.length} 张照片：${names}`;
+  $("sync-start").disabled = false;
+  $("sync-start").textContent = `开始统一风格（${files.length} 张） ↗`;
+}
+
+async function openStyleSyncDialog() {
+  const v = (state.job?.variants || []).find(x => x.slot === state.selected);
+  if (!state.jobId || !v) return;
+  const version = selectedVersion();
+  $("sync-anchor-img").src = version?.url || v.url;
+  const dir = v.recipe?.style_workflow?.direction_title || "";
+  $("sync-anchor-desc").textContent = `基准成片：方案 ${v.slot} · ${v.title}${dir && dir !== v.title ? `（${dir}）` : ""}${version ? " · 当前微调版" : ""}`;
+  $("sync-error").textContent = "";
+  setSyncFiles([]);
+  $("sync-files").value = "";
+  const dlg = $("sync-dialog");
+  if (!dlg.open) dlg.showModal();
+  await loadStyleBatchesForJob();
+}
+
+async function loadStyleBatchesForJob() {
+  if (!state.jobId) return;
+  try {
+    const data = await api(`/api/style-batches?job_id=${encodeURIComponent(state.jobId)}`);
+    state.syncBatches = data.batches || [];
+    const bar = $("sync-batches-bar");
+    bar.classList.toggle("hidden", !state.syncBatches.length);
+    if (state.syncBatches.length) {
+      $("sync-batch-pills").innerHTML = state.syncBatches.map(b => `
+        <button type="button" class="sync-batch-pill ${b.id === state.syncBatchId ? "active" : ""}" data-bid="${escapeHtml(b.id)}">
+          ${escapeHtml(b.title)} · ${b.done_count}/${b.total_count} 张
+        </button>`).join("");
+      $("sync-batch-pills").querySelectorAll("[data-bid]").forEach(btn => {
+        btn.addEventListener("click", () => openStyleBatch(btn.dataset.bid));
+      });
+      if (!state.syncBatchId || !state.syncBatches.some(b => b.id === state.syncBatchId)) {
+        await openStyleBatch(state.syncBatches[0].id);
+      } else {
+        await openStyleBatch(state.syncBatchId);
+      }
+    } else {
+      $("sync-results").classList.add("hidden");
+    }
+  } catch (err) {
+    $("sync-error").textContent = err.message || String(err);
+  }
+}
+
+async function submitStyleSync() {
+  if (!state.jobId || !state.syncFiles.length) return;
+  const btn = $("sync-start");
+  btn.disabled = true;
+  btn.textContent = "正在上传并提取基准风格…";
+  $("sync-error").textContent = "";
+  const form = new FormData();
+  form.append("slot", state.selected);
+  const ver = selectedVersion();
+  if (ver) form.append("version", ver.id);
+  form.append("match_exposure", String($("sync-match-exp").checked));
+  form.append("match_wb", String($("sync-match-wb").checked));
+  form.append("style_strength", String(Number($("sync-strength").value) / 100));
+  for (const file of state.syncFiles) form.append("files", file);
+  try {
+    const res = await fetch(`/api/jobs/${encodeURIComponent(state.jobId)}/sync-style`, { method: "POST", body: form });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "批量套用提交失败");
+    setSyncFiles([]);
+    $("sync-files").value = "";
+    state.syncBatchId = data.id;
+    renderStyleBatch(data);
+    await loadStyleBatchesForJob();
+    pollStyleBatch();
+  } catch (err) {
+    $("sync-error").textContent = err.message || String(err);
+    btn.disabled = !state.syncFiles.length;
+    btn.textContent = state.syncFiles.length ? `开始统一风格（${state.syncFiles.length} 张） ↗` : "开始统一风格 ↗";
+  }
+}
+
+async function openStyleBatch(batchId) {
+  clearTimeout(state.syncPoll);
+  state.syncBatchId = batchId;
+  $("sync-batch-pills").querySelectorAll("[data-bid]").forEach(b => b.classList.toggle("active", b.dataset.bid === batchId));
+  try {
+    const data = await api(`/api/style-batches/${encodeURIComponent(batchId)}`);
+    renderStyleBatch(data);
+    if (["queued", "running"].includes(data.status)) pollStyleBatch();
+  } catch (err) {
+    $("sync-error").textContent = err.message || String(err);
+  }
+}
+
+function pollStyleBatch() {
+  clearTimeout(state.syncPoll);
+  const bid = state.syncBatchId;
+  if (!bid || !$("sync-dialog").open) return;
+  state.syncPoll = setTimeout(async () => {
+    try {
+      const data = await api(`/api/style-batches/${encodeURIComponent(bid)}`);
+      if (state.syncBatchId !== bid) return;
+      renderStyleBatch(data);
+      if (["queued", "running"].includes(data.status)) pollStyleBatch();
+    } catch {
+      pollStyleBatch();
+    }
+  }, 1200);
+}
+
+function renderStyleBatch(batch) {
+  $("sync-results").classList.remove("hidden");
+  const finished = (batch.done_count || 0) + (batch.error_count || 0);
+  const pct = batch.total_count ? Math.round((finished / batch.total_count) * 100) : 0;
+  $("sync-bar-fill").style.width = `${pct}%`;
+  const stateCopy = batch.status === "ready" ? "全部风格统一完成" : batch.status === "error" ? "批量处理出现错误" : "正在逐张对齐影调并渲染…";
+  $("sync-progress-text").textContent = `${stateCopy}（${batch.done_count}/${batch.total_count} 张成功${batch.error_count ? ` · ${batch.error_count} 张失败` : ""}）`;
+  const opts = batch.sync_options || {};
+  $("sync-progress-meta").textContent = `基准：${batch.title} · 强度 ${Math.round((opts.style_strength ?? 1) * 100)}%${opts.match_exposure !== false ? " · 自动曝光对齐" : ""}${opts.match_wb !== false ? " · 自动白平衡统一" : ""}`;
+  const zipBtn = $("sync-zip");
+  zipBtn.classList.toggle("hidden", !batch.zip_url);
+  if (batch.zip_url) {
+    zipBtn.href = batch.zip_url;
+    zipBtn.download = `SuperPhoto-同风格批量-${batch.id.slice(0, 8)}.zip`;
+  }
+  const toCollageBtn = $("sync-to-collage");
+  if (toCollageBtn) {
+    toCollageBtn.classList.toggle("hidden", !(batch.done_count > 0));
+    toCollageBtn.dataset.batchId = batch.id;
+  }
+  const activePill = $("sync-batch-pills")?.querySelector(`[data-bid="${CSS.escape(batch.id)}"]`);
+  if (activePill) activePill.textContent = `${batch.title} · ${batch.done_count}/${batch.total_count} 张`;
+
+  const grid = $("sync-grid");
+  grid.innerHTML = (batch.items || []).map(item => {
+    const isReady = item.status === "ready";
+    const isErr = item.status === "error";
+    const badgeText = isReady ? "已完成 · 左右拖动对比" : isErr ? "失败" : item.status === "running" ? "正在对齐渲染…" : "排队中";
+    const m = item.metrics || {};
+    const metaText = isReady
+      ? `耗时 ${m.seconds ?? "?"}s · 曝光 ${m.exposure_ev >= 0 ? "+" : ""}${Number(m.exposure_ev || 0).toFixed(2)} EV · 中间调 ${Number(m.before_mid || 0).toFixed(2)} → ${Number(m.after_mid || 0).toFixed(2)}${(m.notes || []).length ? " · " + m.notes.join(" / ") : ""}`
+      : isErr ? (item.error || "处理失败") : "等待后台渲染引擎…";
+    return `
+      <article class="sync-card" data-item-id="${escapeHtml(item.id)}">
+        <div class="sync-card-media ${isReady && item.source_url ? "splitting" : ""}" style="--split:50%">
+          ${item.source_url ? `<img src="${escapeHtml(item.source_url)}" alt="原片 ${escapeHtml(item.original_name)}" />` : ""}
+          ${isReady ? `<img class="sync-after" src="${escapeHtml(item.result_url)}" alt="成片 ${escapeHtml(item.original_name)}" />` : ""}
+          <span class="sync-line" aria-hidden="true"></span>
+          <span class="sync-card-badge ${isReady ? "ready" : isErr ? "error" : ""}">${escapeHtml(badgeText)}</span>
+        </div>
+        <div class="sync-card-body">
+          <div class="sync-card-name" title="${escapeHtml(item.original_name)}">${escapeHtml(item.original_name)}</div>
+          <div class="sync-card-meta">${escapeHtml(metaText)}</div>
+          ${isReady ? `
+            <div class="sync-card-actions">
+              <a href="${escapeHtml(item.result_url)}" download>下载 JPG ↓</a>
+              <button type="button" data-sync-hold="${escapeHtml(item.id)}">按住看原片</button>
+              <button type="button" data-sync-full="jpeg" data-iid="${escapeHtml(item.id)}">原尺寸 JPEG</button>
+              <button type="button" data-sync-full="tiff" data-iid="${escapeHtml(item.id)}">16位 TIFF</button>
+            </div>` : ""}
+        </div>
+      </article>`;
+  }).join("");
+
+  // Interactive scrub-compare & hold-to-compare on every ready card
+  grid.querySelectorAll(".sync-card-media.splitting").forEach(box => {
+    const updateSplit = (clientX) => {
+      const rect = box.getBoundingClientRect();
+      if (!rect.width) return;
+      const pct = Math.max(2, Math.min(98, ((clientX - rect.left) / rect.width) * 100));
+      box.style.setProperty("--split", `${pct.toFixed(1)}%`);
+    };
+    let active = false;
+    box.addEventListener("pointerdown", (e) => { active = true; box.setPointerCapture(e.pointerId); updateSplit(e.clientX); });
+    box.addEventListener("pointermove", (e) => { if (active) updateSplit(e.clientX); });
+    box.addEventListener("pointerup", () => { active = false; });
+    box.addEventListener("pointercancel", () => { active = false; });
+  });
+  grid.querySelectorAll("[data-sync-hold]").forEach(btn => {
+    const media = btn.closest(".sync-card").querySelector(".sync-card-media");
+    const down = (e) => { e.preventDefault(); btn.classList.add("down"); media.style.setProperty("--split", "100%"); };
+    const up = () => { btn.classList.remove("down"); media.style.setProperty("--split", "50%"); };
+    btn.addEventListener("pointerdown", down);
+    ["pointerup", "pointerleave", "pointercancel"].forEach(ev => btn.addEventListener(ev, up));
+  });
+  grid.querySelectorAll("[data-sync-full]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const fmt = btn.dataset.syncFull;
+      const iid = btn.dataset.iid;
+      const origText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "导出中…";
+      try {
+        const res = await fetch(`/api/style-batches/${encodeURIComponent(batch.id)}/items/${encodeURIComponent(iid)}/full`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ format: fmt }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "导出失败");
+        const a = document.createElement("a");
+        a.href = data.url; a.download = data.filename;
+        document.body.appendChild(a); a.click(); a.remove();
+        btn.textContent = "已导出 ✓";
+        setTimeout(() => { btn.textContent = origText; }, 2200);
+      } catch (err) {
+        $("sync-error").textContent = err.message || String(err);
+        btn.textContent = origText;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
 }

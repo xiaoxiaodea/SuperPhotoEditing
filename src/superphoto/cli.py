@@ -25,6 +25,17 @@ def main(argv: list[str] | None = None) -> None:
     process.add_argument("photo", type=Path)
     process.add_argument("--out", type=Path, default=None)
 
+    sync = sub.add_parser("sync-style", help="apply one finished version's style across other photos or a folder")
+    sync.add_argument("job_id", help="source job id whose finished look is the style anchor")
+    sync.add_argument("slot", choices=tuple(SLOT_LETTERS), help="source variant slot (A-I)")
+    sync.add_argument("sources", nargs="+", type=Path, help="target photo files or folders")
+    sync.add_argument("--refinement", default=None, help="optional refinement id on that slot")
+    sync.add_argument("--out", type=Path, required=True, help="directory where synced JPEGs are written")
+    sync.add_argument("--strength", type=float, default=1.0, help="style strength 0.3..1.3 (default 1.0)")
+    sync.add_argument("--no-exposure-match", action="store_true", help="keep each photo's own brightness")
+    sync.add_argument("--no-wb-match", action="store_true", help="disable automatic inter-shot WB alignment")
+    sync.add_argument("--full-size", action="store_true", help="render at native full resolution")
+
     imports = sub.add_parser("import-folder", help="submit stable photos to the running server")
     imports.add_argument("folder", type=Path)
     imports.add_argument("--watch", action="store_true")
@@ -72,6 +83,8 @@ def main(argv: list[str] | None = None) -> None:
         _serve(args.host, args.port)
     elif args.cmd == "process":
         _process(args.photo, args.out)
+    elif args.cmd == "sync-style":
+        _sync_style(args)
     elif args.cmd == "import-folder":
         if not 0 <= args.stable_seconds <= 60 or not 0 < args.interval <= 60:
             parser.error("stable-seconds must be 0..60; interval must be >0 and <=60")
@@ -147,6 +160,54 @@ def _process(photo: Path, out: Path | None) -> None:
     finally:
         lock.release()
         conn.close()
+
+
+def _sync_style(args: argparse.Namespace) -> None:
+    import shutil
+    from . import style_sync
+    from .ingest import ALLOWED_EXTS
+    from .lightroom import connect_lightroom
+
+    settings = get_settings()
+    conn = connect(settings.db_path)
+    init_db(conn)
+    try:
+        client, _ = connect_lightroom(settings.lightcraft_bin)
+        binary = Path(client.binary)
+        profile = style_sync.extract_style_profile(
+            settings, conn, args.job_id, args.slot, args.refinement, binary=binary
+        )
+    finally:
+        conn.close()
+
+    targets: list[Path] = []
+    for item in args.sources:
+        if item.is_dir():
+            targets.extend(sorted(p for p in item.iterdir() if p.is_file() and p.suffix.lower() in ALLOWED_EXTS))
+        elif item.is_file() and item.suffix.lower() in ALLOWED_EXTS:
+            targets.append(item)
+    if not targets:
+        raise SystemExit("未找到可处理的照片文件")
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    work_root = out_dir / ".work"
+    summary = []
+    for photo in targets:
+        outcome = style_sync.apply_style_to_photo(
+            settings, binary, profile, photo, work_root / photo.stem,
+            match_exposure=not args.no_exposure_match,
+            match_wb=not args.no_wb_match,
+            style_strength=args.strength,
+            edge=0 if args.full_size else None,
+        )
+        dest = out_dir / f"{photo.stem}-同风格.jpg"
+        shutil.copy2(outcome["result"], dest)
+        record = {"source": str(photo), "output": str(dest), **outcome["metrics"]}
+        summary.append(record)
+        print(json.dumps(record, ensure_ascii=False), flush=True)
+    shutil.rmtree(work_root, ignore_errors=True)
+    print(json.dumps({"total": len(summary), "out_dir": str(out_dir)}, ensure_ascii=False, indent=2))
 
 
 def _vision_check(settings, *, list_models: bool = False) -> dict[str, Any]:
