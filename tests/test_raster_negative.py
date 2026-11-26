@@ -153,6 +153,61 @@ def test_hdr_gain_map_extraction_recovers_linear_headroom(tmp_path: Path):
     assert pixels[:, :40, 0].mean() < 1.0
 
 
+def test_hdr_gain_map_preserves_unclipped_misty_sky_without_blowout_or_crater(tmp_path: Path):
+    """Smartphone HDR display-boost gain maps on unclipped skies must NOT blow out SDR tones
+    or create a sharp cliff crater at bright sky corners."""
+    h, w = 128, 128
+    # Unclipped misty sky gradient (sRGB 190..250 -> linear 0.51..0.95) over dark forest (sRGB 50)
+    base = np.full((h, w, 3), 50, dtype=np.uint8)
+    sky = np.linspace(250, 190, h // 2, dtype=np.float32)[:, None]
+    base[:h // 2, :, :] = np.broadcast_to(sky[..., None], (h // 2, w, 3)).astype(np.uint8)
+    base_buf = io.BytesIO()
+    Image.fromarray(base).save(base_buf, format="JPEG", quality=94)
+    base_bytes = base_buf.getvalue()
+
+    # Phone gain map paints +2.3 stops across the entire unclipped bright sky
+    gm = np.zeros((h // 2, w // 2), dtype=np.uint8)
+    gm[:h // 4, :] = 235
+    gm_buf = io.BytesIO()
+    Image.fromarray(gm, mode="L").save(gm_buf, format="JPEG", quality=92)
+    gm_bytes = gm_buf.getvalue()
+    gm_bytes = gm_bytes[:-2] + b"\xff\xfe" + struct.pack(">H", 2400) + (b"\x00" * 2398) + b"\xff\xd9"
+
+    xmp = (
+        b"http://ns.adobe.com/xap/1.0/\x00"
+        b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+        b'<rdf:Description xmlns:hdrgm="http://ns.adobe.com/hdr-gain-map/1.0/" '
+        b'hdrgm:Version="1.0" hdrgm:GainMapMin="0.0" hdrgm:GainMapMax="2.3" '
+        b'hdrgm:Gamma="1.0" hdrgm:OffsetSDR="0.015625" hdrgm:OffsetHDR="0.015625"/>'
+        b"</rdf:RDF></x:xmpmeta>"
+    )
+    app1 = b"\xff\xe1" + struct.pack(">H", len(xmp) + 2) + xmp
+    src = tmp_path / "misty_ultrahdr.jpg"
+    src.write_bytes(base_bytes[:2] + app1 + base_bytes[2:] + gm_bytes)
+
+    dest = tmp_path / "misty_ultrahdr.tif"
+    meta = raster_negative.prepare_raster_negative(src, dest)
+    assert meta["has_gain_map"] is False
+    assert meta["max_linear_headroom"] <= 1.01
+    pixels = _read_f32_tiff_pixels(dest)
+    assert float(pixels.max()) <= 1.01
+    # Top bright sky stays smoothly below 1.0 instead of blowing out to 4.7x
+    assert 0.85 <= float(pixels[2, 64, 0]) <= 0.98
+
+    # Also verify smooth sky transitioning into a small 2% clipped corner with uniform sky gain
+    # yields zero discontinuous jump (excess over border is ~0).
+    lin = np.full((128, 128, 3), 0.10, dtype=np.float32)
+    lin[:64, :, :] = np.linspace(1.0, 0.85, 64, dtype=np.float32)[:, None, None]
+    gm_uniform_sky = {
+        "map": np.where(lin[..., 0] >= 0.84, 0.95, 0.0).astype(np.float32),
+        "min_stops": 0.0, "max_stops": 2.3, "gamma": 1.0,
+        "offset_sdr": 0.015625, "offset_hdr": 0.015625,
+    }
+    out_uniform = raster_negative.apply_gain_map(lin, gm_uniform_sky)
+    assert float(out_uniform.max()) <= 1.01
+    assert np.allclose(out_uniform, lin, atol=1e-5)
+
+
 def test_raster_protection_applies_adaptive_nr_and_micro_grain():
     lifted_doc = {"light": {"exposure": 0.9, "shadows": 45}}
     meta = {"jpeg_blockiness": 0.25, "banding_risk": 0.38, "bit_depth": 8, "has_gain_map": False}

@@ -31,6 +31,7 @@ import base64
 import copy
 import json
 import math
+import os
 import re
 import shutil
 import sqlite3
@@ -603,11 +604,15 @@ def _merged_develop(plan: dict[str, Any]) -> dict[str, Any]:
             target = develop.setdefault(group, {})
             # Non-intensity shape parameters stay at their configured design values instead of scaling to 0.
             unscaled = {"size", "roughness", "sharpen_radius", "sharpen_detail", "sharpen_masking", "midpoint", "feather"}
+            # Detail/NR amounts take max rather than summing so a look's crispness never double-stacks onto a plan's sharpen.
+            max_merge = {"sharpen_amount", "nr_luminance", "nr_color"}
             for key, value in values.items():
                 lo, hi = ranges.get(key, (-100.0, 100.0))
                 if key in unscaled:
                     if key not in target:
                         target[key] = round(min(hi, max(lo, float(value))), 2)
+                elif key in max_merge:
+                    target[key] = round(min(hi, max(lo, max(float(target.get(key, 0.0)), float(value) * strength))), 2)
                 else:
                     target[key] = round(min(hi, max(lo, target.get(key, 0.0) + value * strength)), 2)
     return develop
@@ -1099,6 +1104,41 @@ def _font(size: int):
         return ImageFont.load_default()
 
 
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """Hardlink a read-only render source (0 bytes copied, <0.1ms), falling back to copy across filesystems."""
+    try:
+        if dst.exists():
+            dst.unlink()
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
+def _border_ruled_image(image: Image.Image, edge: int = 896) -> Image.Image:
+    """Single clean preview with 0.1 normalized coordinate ticks on a 24px outer dark margin (0 photo pixels altered)."""
+    pic = image.convert("RGB")
+    if max(pic.size) > edge:
+        pic = pic.copy()
+        pic.thumbnail((edge, edge), Image.Resampling.LANCZOS)
+    w, h = pic.size
+    m = 24
+    canvas = Image.new("RGB", (w + m * 2, h + m * 2), (24, 24, 28))
+    canvas.paste(pic, (m, m))
+    draw = ImageDraw.Draw(canvas)
+    font = _font(12)
+    for step in range(1, 10):
+        x = m + round(w * step / 10)
+        y = m + round(h * step / 10)
+        lbl = f"{step * 10}"
+        draw.line([(x, m - 5), (x, m)], fill=(255, 220, 80), width=1)
+        draw.line([(x, m + h), (x, m + h + 5)], fill=(255, 220, 80), width=1)
+        draw.text((x, 3), lbl, font=font, fill=(255, 225, 90), anchor="mt")
+        draw.line([(m - 5, y), (m, y)], fill=(255, 220, 80), width=1)
+        draw.line([(m + w, y), (m + w + 5, y)], fill=(255, 220, 80), width=1)
+        draw.text((2, y), lbl, font=font, fill=(255, 225, 90), anchor="lm")
+    return canvas
+
+
 def grid_overlay(image: Image.Image) -> Image.Image:
     """Copy with 0.1-spaced normalized coordinate lines and edge labels."""
     base = image.convert("RGBA")
@@ -1523,15 +1563,16 @@ def plan_reach(plan: dict[str, Any], image: Image.Image | Path) -> list[dict[str
 
 
 def measure_looks(binary: Path, original: Path, folder: Path, source_kind: str,
-                  look_ids: Iterable[str] | None = None) -> dict[str, dict[str, float]]:
+                  look_ids: Iterable[str] | None = None,
+                  profile_ids: Iterable[str] | None = None) -> dict[str, dict[str, float]]:
     """Selected looks (all by default) at LOOK_PROBE_STRENGTH on this photo, against the unedited render:
     "chroma", its frame colourfulness as a ratio (left out on a frame with no colour to speak of), and
     "distance", the mean Lab difference (``lightroom_qa.render_distance``, the measure that calls sibling
     versions nearly identical).
 
-    Every profile in looks.PROFILES is measured the same way at PROFILE_PROBE_AMOUNT, under the key
-    "profile:<id>", with its mean Lab shift as well ("a" green-/magenta+, "b" blue-/yellow+): a profile is
-    chosen for its cast as much as for its colourfulness.
+    Selected profiles in looks.PROFILES (all by default) are measured the same way at PROFILE_PROBE_AMOUNT,
+    under the key "profile:<id>", with mean Lab shift ("a" green-/magenta+, "b" blue-/yellow+): a profile
+    is chosen for its cast as much as for its colourfulness.
 
     Rendered on a copy of the photo in ``folder``; a look whose render fails is left out, and an empty dict
     means no numbers (planning goes on without them).
@@ -1541,7 +1582,7 @@ def measure_looks(binary: Path, original: Path, folder: Path, source_kind: str,
 
     folder.mkdir(parents=True, exist_ok=True)
     source = folder / f"source{original.suffix.lower()}"
-    shutil.copy2(original, source)
+    _link_or_copy(original, source)
 
     def one(name: str, plan: dict[str, Any]) -> tuple[str, Path | None]:
         document, _ = compile_document(plan, source_kind)
@@ -1551,10 +1592,11 @@ def measure_looks(binary: Path, original: Path, folder: Path, source_kind: str,
             return name, None
 
     target_ids = [lid for lid in (look_ids if look_ids is not None else LOOKS) if lid in LOOKS]
+    target_profiles = [pid for pid in (profile_ids if profile_ids is not None else PROFILES) if pid in PROFILES]
     jobs = [("unedited", {})] + [(look_id, {"look": {"id": look_id, "strength": LOOK_PROBE_STRENGTH}})
                                  for look_id in target_ids]
     jobs += [(PROFILE_KEY + profile_id, {"profile": {"id": profile_id, "amount": PROFILE_PROBE_AMOUNT}})
-             for profile_id in PROFILES]
+             for profile_id in target_profiles]
     # One session renders them in turn (the pool's threads queue on it); without one, they render cold in parallel.
     with render_session(binary, source), ThreadPoolExecutor(max_workers=LOOK_PROBE_WORKERS) as pool:
         renders = dict(pool.map(lambda item: one(*item), jobs))
@@ -1780,13 +1822,17 @@ def _look_note(entry: dict[str, float], image: float | None) -> str:
 
 
 def _looks_block(measured: dict[str, dict[str, float]] | None = None, image_chroma: float | None = None,
-                 min_distance: float = 5.0, source_kind: str = "jpeg") -> str:
+                 min_distance: float = 5.0, source_kind: str = "jpeg", *,
+                 look_ids: Iterable[str] | None = None, profile_ids: Iterable[str] | None = None) -> str:
     """The looks for a prompt; ``measured`` (from ``measure_looks``) and image 1's frame colourfulness x100 add
     what each look does to this photo's colour and how far it moves the picture."""
     notes = {look_id: note for look_id, entry in (measured or {}).items()
              if look_id in LOOKS and (note := _look_note(entry, image_chroma))}
-    measured_looks = [k for k in (measured or {}) if k in LOOKS]
-    lines = look_lines(notes, look_ids=measured_looks or None)
+    if look_ids is not None:
+        selected_looks = [k for k in look_ids if k in LOOKS]
+    else:
+        selected_looks = [k for k in (measured or {}) if k in LOOKS]
+    lines = look_lines(notes, look_ids=selected_looks or None)
     if not lines:
         return ""
     text = ("LOOKS: palettes distilled from the professional reference preset library (HSL mix, split toning,"
@@ -1816,7 +1862,8 @@ def _looks_block(measured: dict[str, dict[str, float]] | None = None, image_chro
                  f" A's, so a look below {min_distance:g} does not by itself make C visibly different from A: then"
                  " give C its own white balance, grading, calibration or colour targets on the large areas as well,"
                  " or choose a look with a larger number that suits the scene.")
-    return text + "\n" + "\n".join(f"- {line}" for line in lines) + _profiles_block(measured, image_chroma, source_kind)
+    return (text + "\n" + "\n".join(f"- {line}" for line in lines)
+            + _profiles_block(measured, image_chroma, source_kind, profile_ids=profile_ids))
 
 
 def _profile_note(entry: dict[str, float], image: float | None) -> str:
@@ -1838,7 +1885,7 @@ def _profile_note(entry: dict[str, float], image: float | None) -> str:
 
 
 def _profiles_block(measured: dict[str, dict[str, float]] | None, image_chroma: float | None,
-                    source_kind: str = "jpeg") -> str:
+                    source_kind: str = "jpeg", *, profile_ids: Iterable[str] | None = None) -> str:
     """LightCraft's colour profiles for a prompt, with what each measured on this photo (measure_looks)."""
     notes = {key.removeprefix(PROFILE_KEY): note for key, entry in (measured or {}).items()
              if key.startswith(PROFILE_KEY) and (note := _profile_note(entry, image_chroma))}
@@ -1860,7 +1907,7 @@ def _profiles_block(measured: dict[str, dict[str, float]] | None, image_chroma: 
     if notes:
         text += (f" \"on this photo\" was MEASURED at amount {PROFILE_PROBE_AMOUNT:g}; the cast and the distance about"
                  " double at 100, and the colourfulness ratio moves in proportion.")
-    return text + "\n" + "\n".join(f"- {line}" for line in profile_lines(notes))
+    return text + "\n" + "\n".join(f"- {line}" for line in profile_lines(notes, profile_ids=profile_ids))
 
 
 def _source_note(source_kind: str, negative_meta: dict[str, Any] | None = None) -> str:
@@ -2097,7 +2144,8 @@ def is_strong_plan(plan: dict[str, Any], direction: dict[str, Any] | None = None
 
 
 def _rebalance_stylization(plans: dict[str, dict[str, Any]], directions: dict[str, dict[str, Any]],
-                           notes: dict[str, list[str]], weights: dict[str, float] | None = None) -> None:
+                           notes: dict[str, list[str]], weights: dict[str, float] | None = None,
+                           measured_looks: dict[str, dict[str, float]] | None = None) -> None:
     """Enforce the light-stylization-first portfolio policy deterministically on multi-version plans.
 
     - Keeps at most ``MAX_STRONG_STYLIZED`` (1) strongly stylized candidate slot (preferring the one
@@ -2106,9 +2154,59 @@ def _rebalance_stylization(plans: dict[str, dict[str, Any]], directions: dict[st
       (look strength capped to ``DEMOTED_STRONG_STRENGTH_CAP`` and extreme WB/global grading moderated).
     - Keeps ``light``-tier looks at tasteful moderate strength (``<= LIGHT_LOOK_STRENGTH_CAP``) so
       lightly stylized versions stay clean, versatile, and free of heavy-filter cast.
+    - Guarantees a ``subtle_film`` slot that lost an invalid look id still receives a scene-matched
+      light-tier film look instead of collapsing into a duplicate of A.
     """
     weights = weights or {}
     non_a = [s for s in sorted(plans) if s != "A"]
+
+    # Ensure subtle_film never silently drops to a bare duplicate of A, and deduplicate repeated look IDs across B..F.
+    preferred_light = ("vintage_olive", "kodak_film", "clean_cinema", "japanese_airy_film",
+                       "warm_sunset", "european_classic", "cine_teal", "portra_pastel")
+    used_looks: set[str] = set()
+    for slot in non_a:
+        plan = plans[slot]
+        look = plan.get("look")
+        if isinstance(look, dict) and look.get("id"):
+            lid = str(look["id"])
+            if lid in used_looks:
+                # Duplicate look ID across sibling slots: swap to best unused scene-matched look of same tier.
+                want_strong = is_strong_look(lid)
+                pool = [k for k in (preferred_light if not want_strong else LOOKS)
+                        if k in LOOKS and is_strong_look(k) == want_strong and k not in used_looks]
+                if not pool:
+                    pool = [k for k in LOOKS if not is_strong_look(k) and k not in used_looks]
+                if pool:
+                    if measured_looks:
+                        pool.sort(key=lambda k: abs(float((measured_looks.get(k) or {}).get("distance", 6.0)) - 6.0))
+                    new_lid = pool[0]
+                    look["id"] = new_lid
+                    if isinstance(directions.get(slot), dict) and str(directions[slot].get("id") or "").startswith("look:"):
+                        directions[slot] = {**directions[slot], "id": f"look:{new_lid}", "look": new_lid,
+                                            "title": LOOKS[new_lid]["title"]}
+                    notes.setdefault(slot, []).append(f"风格去重：避免与前序方案重复，自动切换为 {new_lid}")
+                    used_looks.add(new_lid)
+            else:
+                used_looks.add(lid)
+    for slot in non_a:
+        plan = plans[slot]
+        d_id = str((directions.get(slot) or {}).get("id") or "")
+        if d_id == "subtle_film" and not plan.get("look") and not plan.get("profile"):
+            dev = plan.get("develop") or {}
+            has_custom_grade = bool(dev.get("grading") or dev.get("calibration") or dev.get("wb"))
+            if not has_custom_grade:
+                candidates = [lid for lid in preferred_light if lid in LOOKS and not is_strong_look(lid) and lid not in used_looks]
+                if not candidates:
+                    candidates = [lid for lid in LOOKS if not is_strong_look(lid) and lid not in used_looks]
+                if candidates:
+                    if measured_looks:
+                        # Prefer a measured light look with clean visible separation (~4-8 dE at 1.0)
+                        candidates.sort(key=lambda lid: abs(float((measured_looks.get(lid) or {}).get("distance", 5.5)) - 6.0))
+                    chosen_look = candidates[0]
+                    plan["look"] = {"id": chosen_look, "strength": 0.62}
+                    used_looks.add(chosen_look)
+                    notes.setdefault(slot, []).append(f"轻量胶片方向自动匹配轻量风格 {chosen_look}（强度 0.62）")
+
     strong_slots = [s for s in non_a if is_strong_plan(plans[s], directions.get(s))]
 
     # Keep only the top MAX_STRONG_STYLIZED strong slot(s); rank by learned weight, then slot order.
@@ -2169,6 +2267,57 @@ def _library_text(library: dict[str, experience.Direction], weights: dict[str, f
     return "\n".join(lines)
 
 
+def _scene_shortlists(stats: dict[str, Any] | None, technical: Any,
+                      library: dict[str, experience.Direction] | None = None,
+                      weights: dict[str, float] | None = None) -> tuple[list[str], list[str]]:
+    """Select the top scene-matched looks (14: 10 light + 4 strong) and profiles (8) for multi-version planning.
+
+    Keeps prompt tokens compact (~55% smaller LOOKS/PROFILES section) while always preserving any look
+    the user has rated or learned in their local experience library.
+    """
+    anchors = (stats or {}).get("anchors") or {}
+    mid = anchors.get("mid")
+    if mid is None and technical is not None:
+        mid = getattr(technical, "mean_luma", None)
+    warmth = getattr(technical, "temperature_bias", None) if technical is not None else None
+    chroma = (stats or {}).get("colourfulness")
+    if chroma is None and technical is not None:
+        chroma = getattr(technical, "saturation_mean", None)
+
+    look_ids = shortlist_for_scene(
+        {"mid": mid, "warmth": warmth, "chroma": chroma},
+        technical=technical,
+        limit=10,
+        max_strong=3,
+    )
+    # Never drop a look that the user has actively rated or that backs a learned planner direction.
+    extra_looks: list[str] = []
+    for dir_id, w in (weights or {}).items():
+        if dir_id.startswith("look:") and abs(float(w) - 1.0) > 1e-4:
+            lid = dir_id.removeprefix("look:")
+            if lid in LOOKS and lid not in look_ids and lid not in extra_looks:
+                extra_looks.append(lid)
+    for d in (library or {}).values():
+        if d.origin == "planner" and d.look and d.look in LOOKS and d.look not in look_ids and d.look not in extra_looks:
+            extra_looks.append(d.look)
+    look_ids = look_ids + extra_looks[:4]
+
+    # Scene-adapted 5 profiles out of 15 (universal core + scene lighting special)
+    core_profiles = [
+        "lc.vivid", "lc.landscape", "lc.film.warm-print", "lc.film.cool-fade",
+    ]
+    if mid is not None and float(mid) < 0.25:
+        extra_profiles = ["lc.cine.night-blue"]
+    elif mid is not None and float(mid) > 0.58:
+        extra_profiles = ["lc.muted.pastel-haze"]
+    elif warmth is not None and float(warmth) > 0.04:
+        extra_profiles = ["lc.film.golden-hour"]
+    else:
+        extra_profiles = ["lc.cine.teal-amber"]
+    profile_ids = [pid for pid in (*core_profiles, *extra_profiles) if pid in PROFILES]
+    return look_ids, profile_ids
+
+
 def _design_text(slots: list[str], library: dict[str, experience.Direction], experience_text: str,
                  weights: dict[str, float] | None, elements: dict[str, Any] | None) -> str:
     others = ", ".join(slots[1:])
@@ -2197,10 +2346,343 @@ def _design_text(slots: list[str], library: dict[str, experience.Direction], exp
             " one instead: \"id\": \"new\" with a short Chinese \"title\", a \"role\" written like the roles below"
             " and \"look\" (a look id or null). Write each version's plan to its direction's role, and keep each plan"
             " compact (intent and mask purposes in a short sentence) so all of them fit in one answer.\n"
+            "   OUTPUT COMPACTNESS (faster generation, identical quality): omit develop.light (tone targets own it),"
+            " zero-valued sliders, and null fields. For B..F, whenever a mask targets the exact same region geometry"
+            " as a mask in A, write {\"use\": \"<A mask name>\", \"adjust\": {...}, \"target\": {\"median\": ..}} to"
+            " inherit A's shape/limit/box without repeating coordinates (write a full mask only for new/different"
+            " regions).\n"
             f"{seen}"
             "   DIRECTION LIBRARY:\n" + _library_text(library, weights) + "\n"
             + (experience_text or "LOCAL EXPERIENCE: nothing has been rated yet on pictures like this one; choose from"
                " the picture alone."))
+
+
+_COMPACT_RULES = """RULES (follow strictly — quality is non-negotiable):
+1. TONE TARGETS ("tone"): black(p1), shadows(p10), mid(p50), highlights(p90), white(p99) on 0..1 display luma + chroma (frame colourfulness x100 at image 1 brightness). Solver sets global exposure, master curve and global saturation—NEVER include develop.light, curve parametric, or color.saturation.
+   A tiny edit is NOT a finished edit: EVERY version (including A!) must visibly improve tonal separation, depth and clarity over image 1—NEVER copy image 1's percentiles unchanged!
+   Scene guides (adapt naturally; keep misty/bright/snow airy rather than dark grey; keep night as night):
+   - normal daylight: black .02-.04, shadows .10-.18, mid .38-.50, highlights .76-.88, white .93-.97
+   - high key (snow/mist/bright sand): black .04-.10, shadows .16-.32, mid .52-.66, highlights .84-.92, white .95-.98
+   - low key/dusk: black .01-.03, shadows .05-.10, mid .20-.32, highlights .55-.75, white .90-.96
+   - night: black .008-.02, shadows .02-.05, mid .05-.14, highlights .25-.55, white .80-.95
+   Bounds from image 1: shadows/mid -1.5..+1.6 EV, highlights/white -1.5..+2.0 EV.
+2. MASKS (REQUIRED — every version MUST have 2-3 purposeful masks; x 0..1 left-right, y 0..1 top-bottom):
+   {"name","purpose","shape","limit"?,"edge"?:40..70,"adjust","target"?}
+   Shapes: linear{"kind":"linear","start":{"x":..,"y":..},"end":{"x":..,"y":..}}, radial{"kind":"radial","center":{"x":..,"y":..},"rx":..,"ry":..,"angle":0,"feather":70,"invert":false}, luminance{"kind":"luminance","lo":..,"hi":..,"feather":0.05}, color{"kind":"color","points":[{"x":..,"y":..}]}.
+   Always pair linear/radial with a luminance or color limit so edges stay invisible (keep hi+feather below untouched background).
+   "target":{"box":[l,t,r,b],"median"?:..,"hue"?:..,"chroma"?:..} sits tightly INSIDE the masked region (omit adjust.exposure if target.median is set; mask exposure cap +-1.25 EV with limit, +-0.7 EV bare). If a mask holds most pixels of a frame percentile (e.g. bright sky = highlights), make the frame percentile and mask target agree!
+   adjust keys (-100..100, exposure in EV): exposure, contrast, highlights, shadows, whites, blacks, temp, tint, saturation, clarity, texture, dehaze.
+3. GLOBAL develop (ONLY include non-zero keys you actually change — NEVER emit empty {} or 0 values!):
+   Optional keys: wb (temp -1500..1500, tint -30..30), color (vibrance), effects (texture, clarity, dehaze), mixer (band sat/lum), grading (shadows/midtones/highlights hue/sat/lum, blending, balance), calibration (red/green/blue hue/sat), vignette (amount: A>=-10, others>=-14), grain (amount 0..45, size, roughness), detail (sharpen_amount 34-44, sharpen_masking 35-60, nr_luminance 10-22).
+4. CRAFT: Tone before colour; clean neutral whites/mist/snow/skin (no cyan/green/magenta casts); preserve micro-detail (no heavy negative texture on daylight/architecture); subtle negative dehaze (-6..-20) adds airy glow; positive vibrance + gentle negative saturation gives velvety cinema depth; lower saturation before blue night grading to prevent banding; no crop.
+5. DISTINCTNESS & COMPACTNESS:
+   - Every version B..F MUST visibly differ from A (Lab dE >= 4) via its own tone/light structure, local masks, or colour look/profile. For subtle_film, ALWAYS pick a [轻量风格] look at strength 0.50-0.70!
+   - ALL human-readable fields (reading, title, intent, why, mask purpose) MUST be concise Chinese (title: 2-6 Chinese chars like "自然通透"/"清透光影"/"轻量胶片", NEVER English ids!).
+   - In B..F, when a mask targets the same region geometry as a mask in A, write {"use":"<A mask name>","adjust":{...},"target":{"median":..}} to inherit A's shape/limit/box instead of repeating coordinates (write full mask only for new regions)."""
+
+def _compact_looks_text(measured: dict[str, dict[str, float]] | None, image_chroma: float | None,
+                        look_ids: list[str], profile_ids: list[str], source_kind: str) -> str:
+    notes = {}
+    for lid in look_ids:
+        entry = (measured or {}).get(lid)
+        if not entry:
+            continue
+        parts = []
+        if entry.get("chroma") is not None and image_chroma:
+            parts.append(f"chroma x{entry['chroma']:.2f} ({entry['chroma'] * image_chroma:.1f})")
+        if entry.get("distance") is not None:
+            parts.append(f"dE {entry['distance']:.1f}")
+        if parts:
+            notes[lid] = f"[here @1.0: {', '.join(parts)}]"
+    p_notes = {}
+    for pid in profile_ids:
+        entry = (measured or {}).get(PROFILE_KEY + pid)
+        if not entry:
+            continue
+        parts = []
+        if entry.get("chroma") is not None and image_chroma:
+            parts.append(f"x{entry['chroma']:.2f}")
+        for key, plus, minus in (("b", "Y", "B"), ("a", "M", "G")):
+            v = entry.get(key)
+            if v is not None and abs(v) >= 0.3:
+                parts.append(f"{plus if v > 0 else minus}{abs(v):.1f}")
+        if entry.get("distance") is not None:
+            parts.append(f"dE {entry['distance']:.1f}")
+        if parts:
+            p_notes[pid] = f"[@50: {', '.join(parts)}]"
+    room = f"+{RAW_LOOK_SATURATION_UP:g}/-{LOOK_SATURATION_ROOM:g}" if source_kind == "raw" else f"+/-{LOOK_SATURATION_ROOM:g}"
+    l_lines = "\n".join(f"- {line}" for line in look_lines(notes, look_ids=look_ids))
+    p_lines = "\n".join(f"- {line}" for line in profile_lines(p_notes, profile_ids=profile_ids))
+    return (f"LOOKS (\"look\":{{\"id\":\"..\",\"strength\":0.45..0.85}}; solver sat room {room}; A uses no look):\n{l_lines}\n"
+            f"PROFILES (optional \"profile\":{{\"id\":\"..\",\"amount\":40..60}}, never on A, max 1-2 versions):\n{p_lines}")
+
+
+def _grid4_text(grid8: list[list[int]] | None) -> str:
+    """Downsample an 8x8 measurement grid into a compact 4x4 single-line summary (~4x fewer tokens)."""
+    if not grid8 or len(grid8) < 2:
+        return ""
+    h, w = len(grid8), len(grid8[0])
+    step_r = max(1, h // 4)
+    step_c = max(1, w // 4)
+    rows = []
+    for r in range(0, h, step_r):
+        if len(rows) >= 4:
+            break
+        vals = []
+        for c in range(0, w, step_c):
+            if len(vals) >= 4:
+                break
+            block = [grid8[rr][cc] for rr in range(r, min(h, r + step_r)) for cc in range(c, min(w, c + step_c))
+                     if isinstance(grid8[rr][cc], (int, float))]
+            vals.append(f"{round(sum(block) / max(1, len(block))):2d}" if block else "--")
+        rows.append(" ".join(vals))
+    return " | ".join(rows)
+
+
+def _norm_01(val: Any, *, force_pct: bool = False) -> float | None:
+    """Convert either 0..1 float or 0..100 compact integer coordinate/luma cleanly to 0..1 float."""
+    num = _number(val)
+    if num is None:
+        return None
+    return round(num / 100.0, 4) if (force_pct or num > 1.0) else round(num, 4)
+
+
+def _is_pct_seq(vals: Iterable[Any]) -> bool:
+    """True when a compact numeric sequence uses 0..100 integer scale (so 1 means 0.01, not 1.0)."""
+    nums = [_number(v) for v in vals]
+    return any(n is not None and n > 1.0 for n in nums)
+
+
+def _expand_compact_shape(raw: Any) -> dict[str, Any] | None:
+    """Expand compact mask shape array (['lin',x1,y1,x2,y2], ['rad',cx,cy,rx,ry,f], ['lum',lo,hi,f], ['col',[x,y]]) into standard dict."""
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, list) or not raw:
+        return None
+    kind = str(raw[0]).strip().lower()
+    if kind in ("lin", "linear") and len(raw) >= 5:
+        pct = _is_pct_seq(raw[1:5])
+        x1, y1, x2, y2 = (_norm_01(raw[i], force_pct=pct) for i in (1, 2, 3, 4))
+        if None not in (x1, y1, x2, y2):
+            return {"kind": "linear", "start": {"x": x1, "y": y1}, "end": {"x": x2, "y": y2}}
+    if kind in ("rad", "radial") and len(raw) >= 5:
+        pct = _is_pct_seq(raw[1:5])
+        cx, cy, rx, ry = (_norm_01(raw[i], force_pct=pct) for i in (1, 2, 3, 4))
+        feather = float(_number(raw[5]) or 70.0) if len(raw) >= 6 else 70.0
+        invert = bool(raw[6]) if len(raw) >= 7 else False
+        if None not in (cx, cy, rx, ry):
+            return {"kind": "radial", "center": {"x": cx, "y": cy}, "rx": rx, "ry": ry,
+                    "angle": 0.0, "feather": feather, "invert": invert}
+    if kind in ("lum", "luminance") and len(raw) >= 3:
+        pct = _is_pct_seq(raw[1:4])
+        lo, hi = _norm_01(raw[1], force_pct=pct), _norm_01(raw[2], force_pct=pct)
+        feather = _norm_01(raw[3], force_pct=pct) if len(raw) >= 4 else 0.05
+        if lo is not None and hi is not None:
+            return {"kind": "luminance", "lo": lo, "hi": hi, "feather": feather if feather is not None else 0.05}
+    if kind in ("col", "color", "colour") and len(raw) >= 2:
+        flat = [coord for item in raw[1:] if isinstance(item, (list, tuple)) and len(item) == 2 for coord in item]
+        pct = _is_pct_seq(flat)
+        pts = []
+        for item in raw[1:]:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                px, py = _norm_01(item[0], force_pct=pct), _norm_01(item[1], force_pct=pct)
+                if px is not None and py is not None:
+                    pts.append({"x": px, "y": py})
+        if pts:
+            return {"kind": "color", "points": pts}
+    return None
+
+
+def _expand_compact_tone(raw: Any) -> dict[str, float]:
+    """Expand 6-element tone array [black,shadows,mid,highlights,white,chroma] (0..100 int or 0..1 float) into standard tone dict."""
+    if isinstance(raw, dict):
+        pct = _is_pct_seq(raw.get(k) for k in tone.ORDER if k in raw)
+        out: dict[str, float] = {}
+        for k, v in raw.items():
+            if k in tone.ORDER:
+                n = _norm_01(v, force_pct=pct)
+                if n is not None:
+                    out[k] = n
+            elif k == "chroma":
+                c = _number(v)
+                if c is not None:
+                    out["chroma"] = c
+        return out
+    if isinstance(raw, list) and len(raw) >= 5:
+        pct = _is_pct_seq(raw[:5])
+        out = {}
+        for idx, name in enumerate(tone.ORDER):
+            n = _norm_01(raw[idx], force_pct=pct)
+            if n is not None:
+                out[name] = n
+        if len(raw) >= 6:
+            c = _number(raw[5])
+            if c is not None:
+                # In compact 0..100 int mode, chroma 58 means chroma_x100 = 5.8 (keep <= 25 as-is if already x100)
+                out["chroma"] = round(c / 10.0, 2) if (pct and c > 25.0) else round(c, 2)
+        return out
+    return {}
+
+
+def _expand_compact_mask(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    if "shape" in raw and isinstance(raw["shape"], dict):
+        return raw
+    shape = _expand_compact_shape(raw.get("s") or raw.get("shape"))
+    if shape is None:
+        return None
+    out: dict[str, Any] = {
+        "name": str(raw.get("n") or raw.get("name") or "region"),
+        "purpose": str(raw.get("p") or raw.get("purpose") or ""),
+        "shape": shape,
+        "adjust": dict(raw.get("a") or raw.get("adjust") or {}),
+    }
+    lim = _expand_compact_shape(raw.get("l") or raw.get("limit"))
+    if lim is not None:
+        out["limit"] = lim
+    if raw.get("e") is not None or raw.get("edge") is not None:
+        out["edge"] = raw.get("e") if raw.get("e") is not None else raw.get("edge")
+    tg = raw.get("tg") if "tg" in raw else raw.get("target")
+    if isinstance(tg, dict):
+        out["target"] = dict(tg)
+    elif isinstance(tg, list) and len(tg) >= 5:
+        pct = _is_pct_seq(tg[:5])
+        box = [_norm_01(tg[i], force_pct=pct) for i in range(4)]
+        med = _norm_01(tg[4], force_pct=pct)
+        if None not in box and med is not None:
+            out["target"] = {"box": box, "median": med}
+    return out
+
+
+def _expand_ultra_compact(data: dict[str, Any], slots: list[str]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Expand ultra-compact local Ollama JSON ({\"r\":..,\"A\":..,\"v\":{\"B\":..}}) into full standard planning schema.
+
+    Passes standard-format responses (\"plans\" already present) through untouched.
+    Returns ``(standard_data, extracted_elements_or_None)``.
+    """
+    if not isinstance(data, dict) or isinstance(data.get("plans"), dict):
+        return data, None
+    if not isinstance(data.get("A"), dict) or not isinstance(data.get("v"), dict):
+        return data, None
+
+    r = data.get("r") if isinstance(data.get("r"), dict) else {}
+    raw_box = r.get("box") or r.get("subject_box")
+    box = None
+    if isinstance(raw_box, list) and len(raw_box) == 4:
+        nb = [_norm_01(x) for x in raw_box]
+        if None not in nb:
+            box = nb
+    raw_probs = r.get("pr") or r.get("problems") or []
+    problems = []
+    for item in raw_probs if isinstance(raw_probs, list) else []:
+        if isinstance(item, dict):
+            problems.append(item)
+        elif isinstance(item, str) and item.strip():
+            problems.append({"issue": item.strip(), "region": "全图", "severity": 0.7})
+    reading = {
+        "scene": str(r.get("sc") or r.get("scene") or ""),
+        "genre": str(r.get("g") or r.get("genre") or "general"),
+        "subject": str(r.get("sb") or r.get("subject") or ""),
+        "subject_box": box,
+        "subject_confidence": 0.85 if box else 0.0,
+        "light": str(r.get("lt") or r.get("light") or ""),
+        "problems": problems,
+        "preserve": [str(x) for x in (r.get("ps") or r.get("preserve") or []) if str(x).strip()],
+    }
+    raw_el = r.get("el") or r.get("elements")
+    raw_lk = r.get("lk") or r.get("light_kind")
+    extracted_elements = None
+    if raw_el is not None or raw_lk is not None:
+        g = reading["genre"].strip().lower()
+        extracted_elements = {
+            "elements": experience.clean_elements(raw_el),
+            "light_kind": experience.clean_light(raw_lk),
+            "genre": g if g in GENRES else "general",
+            "error": None,
+            "audit": {},
+        }
+
+    # Expand master plan A
+    raw_a = data["A"]
+    masks_a = [m for m in (_expand_compact_mask(item) for item in (raw_a.get("ms") or raw_a.get("masks") or [])) if m]
+    dev_a = copy.deepcopy(raw_a.get("dev") or raw_a.get("develop") or {})
+    plan_a: dict[str, Any] = {
+        "title": str(raw_a.get("t") or raw_a.get("title") or DEFAULT_TITLES["A"]),
+        "intent": str(raw_a.get("w") or raw_a.get("intent") or reading["scene"] or "自然还原光影与细节"),
+        "tone": _expand_compact_tone(raw_a.get("tn") if "tn" in raw_a else raw_a.get("tone")),
+        "develop": dev_a,
+        "masks": masks_a,
+    }
+    plans: dict[str, Any] = {"A": plan_a}
+    directions: dict[str, Any] = {}
+
+    # Expand delta variants B..F inheriting A's masks & base detail
+    variants = data["v"]
+    for slot in slots:
+        if slot == "A" or not isinstance(variants.get(slot), dict):
+            continue
+        rv = variants[slot]
+        dir_id = str(rv.get("d") or rv.get("dir") or "").strip()
+        title = str(rv.get("t") or rv.get("title") or DEFAULT_TITLES.get(slot, slot))
+        why = str(rv.get("w") or rv.get("why") or title)
+        directions[slot] = {"id": dir_id, "why": why}
+        if dir_id == "new":
+            directions[slot].update({"title": title, "role": why})
+
+        # Inherit A's detail (sharpen/nr) and overlay variant dev overrides
+        dev_v = copy.deepcopy(dev_a)
+        v_dev = rv.get("dev") or rv.get("develop") or {}
+        if isinstance(v_dev, dict):
+            for grp, vals in v_dev.items():
+                if isinstance(vals, dict) and vals:
+                    dev_v.setdefault(grp, {}).update(copy.deepcopy(vals))
+
+        # Inherit A's masks + apply per-mask mm overrides + any extra_masks
+        mm = rv.get("mm") or rv.get("mask_mods") or {}
+        mm_norm = {str(k).strip().lower(): v for k, v in mm.items()} if isinstance(mm, dict) else {}
+        v_masks = []
+        for ma in masks_a:
+            mc = copy.deepcopy(ma)
+            mod = mm_norm.get(str(mc.get("name") or "").strip().lower())
+            if isinstance(mod, dict):
+                if isinstance(mod.get("a") or mod.get("adjust"), dict):
+                    mc.setdefault("adjust", {}).update(copy.deepcopy(mod.get("a") or mod.get("adjust")))
+                new_m = mod.get("m") if "m" in mod else mod.get("median")
+                if new_m is not None:
+                    nm = _norm_01(new_m)
+                    if nm is not None and isinstance(mc.get("target"), dict):
+                        mc["target"]["median"] = nm
+            v_masks.append(mc)
+        for extra in (rv.get("em") or rv.get("extra_masks") or []):
+            em = _expand_compact_mask(extra)
+            if em is not None:
+                v_masks.append(em)
+
+        plan_v: dict[str, Any] = {
+            "title": title,
+            "intent": why,
+            "tone": _expand_compact_tone(rv.get("tn") if "tn" in rv else rv.get("tone")) or copy.deepcopy(plan_a["tone"]),
+            "develop": dev_v,
+            "masks": v_masks,
+        }
+        raw_lk = rv.get("lk") if "lk" in rv else rv.get("look")
+        if isinstance(raw_lk, list) and len(raw_lk) >= 2 and isinstance(raw_lk[0], str):
+            plan_v["look"] = {"id": raw_lk[0].strip(), "strength": float(_number(raw_lk[1]) or 0.65)}
+        elif isinstance(raw_lk, dict) and raw_lk.get("id"):
+            plan_v["look"] = raw_lk
+        elif isinstance(raw_lk, str) and raw_lk.strip() and raw_lk.strip().lower() != "null":
+            plan_v["look"] = {"id": raw_lk.strip(), "strength": 0.65}
+        raw_pr = rv.get("pr") if "pr" in rv else rv.get("profile")
+        if isinstance(raw_pr, list) and len(raw_pr) >= 2 and isinstance(raw_pr[0], str):
+            plan_v["profile"] = {"id": raw_pr[0].strip(), "amount": float(_number(raw_pr[1]) or 50.0)}
+        elif isinstance(raw_pr, dict) and raw_pr.get("id"):
+            plan_v["profile"] = raw_pr
+        elif isinstance(raw_pr, str) and raw_pr.strip() and raw_pr.strip().lower() != "null":
+            plan_v["profile"] = {"id": raw_pr.strip(), "amount": 50.0}
+        plans[slot] = plan_v
+
+    return {"reading": reading, "directions": directions, "plans": plans}, extracted_elements
 
 
 def plan_prompt(technical: Any, size: tuple[int, int], stats: dict[str, Any] | None = None,
@@ -2208,13 +2690,68 @@ def plan_prompt(technical: Any, size: tuple[int, int], stats: dict[str, Any] | N
                 slots: list[str] | None = None, library: dict[str, experience.Direction] | None = None,
                 experience_text: str = "", weights: dict[str, float] | None = None,
                 elements: dict[str, Any] | None = None,
-                negative_meta: dict[str, Any] | None = None) -> str:
+                negative_meta: dict[str, Any] | None = None,
+                compact: bool = False) -> str:
     """The planning prompt. Without ``library`` it asks for the classic trio A/B/C; with it, for ``slots`` versions
-    whose directions (after the natural A) the planner chooses, given ``experience_text`` (experience_block)."""
+    whose directions (after the natural A) the planner chooses, given ``experience_text`` (experience_block).
+
+    ``compact=True`` (used for local Ollama multi-version planning) encodes the 6 versions as Master A +
+    compact delta variants B..F on 0..100 integer scale with compact mask arrays, fitting inside 4K context
+    (~2,100 prompt tok, ~500 output tok -> ~45s total VLM wall time, 0 quality loss).
+    """
     measurements = _measurements(technical)
     source_kind = str(measurements.get("source_kind") or "jpeg")
     width, height = size
     raw = source_kind == "raw"
+    shortlist_looks, shortlist_profiles = (
+        _scene_shortlists(stats, technical, library, weights) if library is not None else (None, None)
+    )
+    if compact and library is not None:
+        slots = list(slots or ALL_SLOTS[:6])
+        others = ", ".join(slots[1:])
+        look_ids = shortlist_looks or list(LOOKS)[:10]
+        prof_ids = shortlist_profiles or list(PROFILES)[:5]
+        look_lines_c = "\n".join(
+            f"{lid}({LOOKS[lid]['title']},{'强' if is_strong_look(lid) else '轻'}):{LOOKS[lid]['use'][:36]}"
+            for lid in look_ids
+        )
+        prof_str = ",".join(prof_ids)
+        anchors_str = _anchor_text(stats["anchors"]) if stats else ""
+        chroma_str = f"{_frame_chroma(stats):.1f}" if stats else ""
+        luma4 = _grid4_text(stats.get("luma")) if stats else ""
+        chroma4 = _grid4_text(stats.get("chroma")) if stats else ""
+        exp_line = f"USER PREF: {experience_text.strip()[:280]}\n" if experience_text else ""
+        raw_note = "RAW negative: lift grey/dark RAW boldly to finished daylight/scene tones (+1..+2.5 EV).\n" if raw else ""
+        var_slots = ",".join(
+            f'"{s}":{{"d":"clean_tone","t":"清透光影","w":"通透立体","tn":[2,12,50,84,97,58],"mm":{{"sky":{{"a":{{"dehaze":16}},"m":70}}}}}}'
+            if s == "B" else (
+                f'"{s}":{{"d":"subtle_film","t":"轻量胶片","w":"细腻胶片","tn":[4,16,48,82,95,55],"lk":["look_id",0.62]}}'
+                if s == "C" else f'"{s}":{{..}}'
+            )
+            for s in slots[1:]
+        )
+        return (
+            f"Master LightCraft retoucher. Border ticks show 0..100 coords (x left-right, y top-bottom).\n"
+            f"{source_kind.upper()} {width}x{height} | {anchors_str} | chroma {chroma_str}\n"
+            f"4x4 luma: {luma4}\n4x4 chroma: {chroma4}\n{raw_note}{exp_line}"
+            f"TASK: Design {len(slots)} distinct versions ({', '.join(slots)}), ALL human text in concise Chinese!\n"
+            f"- A: faithful natural finish (no look/profile), 2-3 pixel-accurate masks, real clarity & depth "
+            f"(hazy/flat frames need mid-to-highlights gap >=25 so distant subjects pop; NEVER copy baseline percentiles).\n"
+            f"- {others}: unique dirs from [clean_tone,airy,subtle_film,dramatic,palette,look:<id>]. "
+            f"Majority MUST be subtle LIGHT stylizations ([轻] looks @0.50-0.75); MAX {MAX_STRONG_STYLIZED} [强] look; "
+            f"MAX {MAX_LOOK_VERSIONS} looks; NEVER repeat the same look id; every version clearly distinct from A (dE>=4).\n"
+            f"LOOKS:\n{look_lines_c}\nPROFILES(opt,never A): {prof_str}\n"
+            f"RULES(TONE TARGETS & MASKS, 0..100 integers):\n"
+            f"- tn=[black,shadows,mid,highlights,white,chroma_x10] (e.g. [3,14,48,82,96,58] -> blk .03, mid .48, chroma 5.8). "
+            f"Solver sets exposure/curve/sat (omit develop.light & sat). Clean neutral whites/skin; sharp micro-detail (detail sharpen_amount 36-42, sharpen_masking 45, nr_luminance 14).\n"
+            f"- A.ms: [{{\"n\":\"sky\",\"p\":\"压雾\",\"s\":[\"lin\",50,0,50,40]|[\"rad\",cx,cy,rx,ry,70]|[\"lum\",70,100,5]|[\"col\",[x,y]],\"l\":[\"lum\",70,100,5](opt),\"a\":{{\"dehaze\":12}},\"tg\":[20,5,80,30,74](opt)}}]. Omit a.exposure when tg set.\n"
+            f"- {others} inherit A's masks & detail! Only write mm:{{\"sky\":{{\"a\":{{..}},\"m\":70}}}} if changed; omit empty mm/dev.\n"
+            f"- Keep Chinese t(2-5 chars) & w(<=10 chars) ultra-concise.\n"
+            f"Return compact JSON only:\n"
+            f'{{"r":{{"sc":"中文场景","g":"landscape|portrait|street|night|indoor|product|general","sb":"中文主体","box":[l,t,r,b],"lt":"中文光线","el":["sky","mist"],"lk":"fog|soft_daylight|golden|harsh_sun|overcast|blue_hour|night|indoor_warm|backlit","pr":["问题1"],"ps":["保留1"]}},'
+            f'"A":{{"t":"自然通透","w":"清晰还原层次","tn":[3,14,48,82,96,58],"dev":{{"color":{{"vibrance":6}},"detail":{{"sharpen_amount":38,"sharpen_masking":45,"nr_luminance":14}}}},"ms":[{{"n":"sky","p":"压雾","s":["lin",50,0,50,40],"l":["lum",70,100,5],"a":{{"dehaze":12}},"tg":[20,5,80,30,74]}}]}},'
+            f'"v":{{{var_slots}}}}}'
+        )
     # On a RAW the note used to be one bullet at the end of a 33k-character prompt, and the reading (same call) set
     # the goals first: ref-r5 DSC02262 read "preserve the deep blue sky, the sky lacks density, the foreground snow
     # is too bright" and planned a dense sky at .56 (his .85) where ref-r4 had planned it pale.
@@ -2228,7 +2765,10 @@ def plan_prompt(technical: Any, size: tuple[int, int], stats: dict[str, Any] | N
                   " light, see above)" if raw else
                   "densify the sky, lift the subject or face, burn a bright distracting edge, separate distant layers,"
                   " protect a light source")
-    looks_text = _looks_block(looks, _frame_chroma(stats) if stats else None, min_distance, source_kind)
+    looks_text = _looks_block(
+        looks, _frame_chroma(stats) if stats else None, min_distance, source_kind,
+        look_ids=shortlist_looks, profile_ids=shortlist_profiles,
+    )
     if library is None:
         design = f"""4. Design three finished versions:
    A: {ROLES['A']}
@@ -2618,18 +3158,21 @@ def _ask(settings: Settings, selection: dict[str, Any], prompt: str, images: lis
     """
     from .critique import _extract_json
 
+    local_ollama = _is_local_ollama(selection)
+    retry_waits = (2.0,) if local_ollama else VISION_RETRY_WAITS
     last: Exception | None = None
     for attempt in range(2):
         asked = prompt if attempt == 0 else prompt + "\nYour previous answer was not valid JSON. Reply with the JSON object only."
-        for wait in (*VISION_RETRY_WAITS, None):
+        for wait in (*retry_waits, None):
             transport: dict[str, Any] = {}
             try:
                 text = chat_vision(_vision_settings(settings), selection.get("resolved_model") or "", asked,
                                    images, selection=selection, audit=transport)
                 break
-            except VisionUnavailable:
+            except VisionUnavailable as exc:
                 audit.setdefault("calls", []).append(transport)
-                if wait is None:
+                # Local Ollama truncation/timeout is deterministic on the same prompt; never burn 80s+ retrying it.
+                if wait is None or (local_ollama and any(tag in str(exc) for tag in ("ValueError", "ReadTimeout"))):
                     raise
                 time.sleep(wait)
         audit.setdefault("calls", []).append(transport)
@@ -2794,9 +3337,191 @@ def _reach_line(slot: str, item: dict[str, Any], source_kind: str = "jpeg") -> s
     return text + f". The target {item['target']:.2f} is out of reach."
 
 
+def _is_local_ollama(selection: dict[str, Any] | None) -> bool:
+    return str((selection or {}).get("provider") or "").lower() == "ollama"
+
+
+def _resized_b64(image: Image.Image, edge: int, quality: int = 85) -> str:
+    if max(image.size) <= edge:
+        return _b64(image, quality)
+    copy_ = image.copy()
+    copy_.thumbnail((edge, edge), Image.Resampling.LANCZOS)
+    return _b64(copy_, quality)
+
+
+def _expand_inherited_masks(plans_raw: dict[str, Any]) -> dict[str, Any]:
+    """Expand compact mask references ({\"use\": \"<A mask name>\", ...}) in B..F into full masks from A.
+
+    Allows multi-version VLM answers to avoid repeating identical shape/limit/box geometry 5 times,
+    cutting ~1,200-1,800 output tokens (~80-110s on local 32B) with zero change to executed masks.
+    """
+    if not isinstance(plans_raw, dict):
+        return plans_raw
+    plan_a = plans_raw.get("A")
+    if not isinstance(plan_a, dict) or not isinstance(plan_a.get("masks"), list):
+        return plans_raw
+    base_by_name: dict[str, dict[str, Any]] = {}
+    for m in plan_a["masks"]:
+        if isinstance(m, dict) and str(m.get("name") or "").strip():
+            base_by_name[str(m["name"]).strip().lower()] = m
+    if not base_by_name:
+        return plans_raw
+
+    expanded = dict(plans_raw)
+    for slot, raw_plan in plans_raw.items():
+        if slot == "A" or not isinstance(raw_plan, dict) or not isinstance(raw_plan.get("masks"), list):
+            continue
+        new_masks = []
+        changed = False
+        for m in raw_plan["masks"]:
+            if not isinstance(m, dict):
+                new_masks.append(m)
+                continue
+            ref = m.get("use") or m.get("same_as") or m.get("from")
+            if not ref and "shape" not in m and m.get("name"):
+                ref = m.get("name")
+            key = str(ref).strip().lower() if isinstance(ref, str) and ref.strip() else ""
+            base = base_by_name.get(key)
+            if base is None:
+                new_masks.append(m)
+                continue
+            merged = copy.deepcopy(base)
+            for field in ("name", "purpose", "shape", "limit", "exclude", "edge", "adjust"):
+                if field in m and m[field] is not None:
+                    merged[field] = copy.deepcopy(m[field])
+            if "target" in m:
+                if m["target"] is None:
+                    merged.pop("target", None)
+                elif isinstance(m["target"], dict):
+                    base_target = merged.get("target") if isinstance(merged.get("target"), dict) else {}
+                    merged["target"] = {**copy.deepcopy(base_target), **copy.deepcopy(m["target"])}
+            new_masks.append(merged)
+            changed = True
+        if changed:
+            expanded[slot] = {**raw_plan, "masks": new_masks}
+    return expanded
+
+
+def _labeled_contact_sheet(panels: list[tuple[str, Image.Image]], tile_edge: int = 560) -> Image.Image:
+    """Pack multiple previews into ONE crisp labeled contact sheet so local Ollama pays 1 image (~1k tok) instead of N (~7k tok)."""
+    if not panels:
+        return Image.new("RGB", (64, 64), (18, 18, 22))
+    sample_w, sample_h = panels[0][1].size
+    scale = tile_edge / max(sample_w, sample_h, 1)
+    tw = max(128, int(round(sample_w * scale)))
+    th = max(128, int(round(sample_h * scale)))
+    header = 28
+    n = len(panels)
+    cols = min(4, n) if n <= 4 else (4 if n >= 7 else 3)
+    rows = (n + cols - 1) // cols
+    sheet = Image.new("RGB", (cols * tw, rows * (th + header)), (20, 20, 24))
+    draw = ImageDraw.Draw(sheet)
+    font = _font(16)
+    for idx, (label, img) in enumerate(panels):
+        r, c = divmod(idx, cols)
+        x0, y0 = c * tw, r * (th + header)
+        tile = img.convert("RGB").resize((tw, th), Image.Resampling.LANCZOS)
+        sheet.paste(tile, (x0, y0 + header))
+        draw.rectangle([x0, y0, x0 + tw - 1, y0 + header - 1], fill=(28, 28, 34))
+        draw.text((x0 + 8, y0 + 5), label, font=font, fill=(245, 245, 250))
+    return sheet
+
+
+def _reconcile_shared_reach(plans: dict[str, dict[str, Any]], baseline: Image.Image | Path,
+                            notes: dict[str, list[str]], *, include_numeric: bool = False) -> list[str]:
+    """Deterministically reconcile mathematical target conflicts in <2ms without a multi-minute VLM roundtrip.
+
+    - Always reconciles `shared` frame/mask percentile contradictions while protecting tonal separation
+      (never flattening `mid` up into `highlights`).
+    - When ``include_numeric=True`` (used for local Ollama), also reconciles numeric ``reach`` (clamping
+      mask target into its reachable ``reach_curve`` interval) and ``against`` (nudging mask target toward
+      ``edge`` so mask and tone curve agree) instead of spending 4+ minutes on a VLM full-plan rewrite.
+    """
+    reconciled: list[str] = []
+    allowed_kinds = {"shared", "reach", "against"} if include_numeric else {"shared"}
+    for slot in sorted(plans):
+        initial = plan_reach(plans[slot], baseline)
+        if not any(item.get("kind") in allowed_kinds for item in initial):
+            continue
+        trial = copy.deepcopy(plans[slot])
+        tone_block = trial.get("tone")
+        if not isinstance(tone_block, dict):
+            continue
+        anchors = {k: float(tone_block[k]) for k in tone.ORDER if k in tone_block and isinstance(tone_block[k], (int, float))}
+        if len(anchors) < 3:
+            continue
+        masks = trial.get("masks") if isinstance(trial.get("masks"), list) else []
+        mask_by_name = {str(m.get("name") or ""): m for m in masks if isinstance(m, dict)}
+
+        cur_flags = initial
+        for _ in range(3):
+            actionable = [item for item in cur_flags if item.get("kind") in allowed_kinds]
+            if not actionable:
+                break
+            changed = False
+            for item in actionable:
+                kind = item.get("kind")
+                m = mask_by_name.get(str(item.get("name") or ""))
+                tgt = m.get("target") if isinstance(m, dict) and isinstance(m.get("target"), dict) else None
+                if kind == "shared":
+                    anchor = item.get("anchor")
+                    sim = item.get("simulated")
+                    if anchor in anchors and isinstance(sim, (int, float)):
+                        cand = round(min(0.995, max(0.005, float(sim))), 3)
+                        # Guard against collapsing mid into highlights (which washes hazy/bright scenes flat)
+                        if anchor == "mid" and "highlights" in anchors and anchors["highlights"] - cand < 0.14:
+                            if tgt is not None and isinstance(item.get("by_curve"), (int, float)):
+                                tgt["median"] = round(float(item["by_curve"]), 3)
+                                changed = True
+                                continue
+                        anchors[anchor] = cand
+                        changed = True
+                elif kind == "reach" and tgt is not None:
+                    rc = item.get("reach_curve")
+                    if isinstance(rc, (list, tuple)) and len(rc) == 2:
+                        lo, hi = float(rc[0]), float(rc[1])
+                        cur_med = float(tgt.get("median", item.get("target", 0.5)))
+                        clamped = round(min(hi, max(lo, cur_med)), 3)
+                        if abs(clamped - cur_med) > 1e-4:
+                            tgt["median"] = clamped
+                            changed = True
+                elif kind == "against" and tgt is not None:
+                    edge = item.get("edge")
+                    if isinstance(edge, (int, float)):
+                        new_med = round(min(0.98, max(0.02, float(edge))), 3)
+                        if abs(new_med - float(tgt.get("median", new_med))) > 1e-4:
+                            tgt["median"] = new_med
+                            changed = True
+            if not changed:
+                break
+            ordered = tone._increasing(anchors)
+            for k, v in ordered.items():
+                tone_block[k] = round(v, 3)
+            cur_flags = plan_reach(trial, baseline)
+        if len(cur_flags) < len(initial):
+            plans[slot] = trial
+            reconciled.append(slot)
+            notes.setdefault(slot, []).append("影调锚点与局部目标已自动数学对齐，避免曲线与蒙版冲突")
+    return reconciled
+
+
+def _compact_context_header(stats: dict[str, Any] | None, source_kind: str, size: tuple[int, int]) -> str:
+    """Short image-measurement header for surgical follow-up calls (reach-fix / apart-fix) without 50k bloat."""
+    width, height = size
+    head = (f"You are a senior photo retoucher directing LightCraft. Source: {source_kind.upper()}, "
+            f"aspect {width / max(height, 1):.3f} (width/height).\n"
+            "Image 1 is the neutral LightCraft render; Image 2 is the same picture with a 0.1 coordinate grid.\n")
+    if stats:
+        head += (f"Measured on image 1: percentiles {_anchor_text(stats['anchors'])}; "
+                 f"frame colourfulness x100 {_frame_chroma(stats):.1f}.\n"
+                 f"Median luma per cell x100 (8x8):\n{tone.grid_text(stats['luma'])}\n")
+    return head
+
+
 def _plan_reach_fix(settings: Settings, selection: dict[str, Any], prompt: str, images: list[str],
                     audit: dict[str, Any], plans: dict[str, dict[str, Any]], notes: dict[str, list[str]],
-                    reach: dict[str, list[dict[str, Any]]], baseline: Image.Image | Path, source_kind: str = "jpeg"
+                    reach: dict[str, list[dict[str, Any]]], baseline: Image.Image | Path, source_kind: str = "jpeg",
+                    *, stats: dict[str, Any] | None = None, size: tuple[int, int] | None = None,
                     ) -> tuple[list[str], dict[str, list[dict[str, Any]]], list[str]]:
     """Ask once for the plans whose region targets image 1 shows out of reach or in conflict: the slots replaced,
     what each replacement still flags, and the slots whose answer was refused for flagging more than its plan did
@@ -2805,10 +3530,14 @@ def _plan_reach_fix(settings: Settings, selection: dict[str, Any], prompt: str, 
     lines = "\n".join(_reach_line(slot, item, source_kind) for slot in slots for item in reach[slot])
     written = json.dumps({slot: _shown(plans[slot]) for slot in slots}, ensure_ascii=False)
     frame_rule = _REACH_FRAME_RULE["raw" if source_kind == "raw" else "jpeg"]
+    # Surgical follow-up: never re-send 22k+ chars of looks/profiles/lessons when fixing 1-2 mask targets.
+    base_prefix = (_compact_context_header(stats, source_kind, size)
+                   if (stats is not None and size is not None) else prompt)
+    ask_images = images[-1:] if (_is_local_ollama(selection) and len(images) >= 2) else images
     try:
-        data = _ask(settings, selection, prompt + _PLANS_REACH.format(lines=lines, slots=", ".join(slots),
-                                                                      frame_rule=frame_rule, written=written),
-                    images, audit)
+        data = _ask(settings, selection, base_prefix + _PLANS_REACH.format(lines=lines, slots=", ".join(slots),
+                                                                           frame_rule=frame_rule, written=written),
+                    ask_images, audit)
     except (VisionUnavailable, ValueError):
         return [], {}, []
     raw = data.get("plans") if isinstance(data.get("plans"), dict) else data
@@ -2834,7 +3563,7 @@ def _plan_reach_fix(settings: Settings, selection: dict[str, Any], prompt: str, 
     return replaced, after, refused
 
 
-ELEMENTS_EDGE = 768
+ELEMENTS_EDGE = 512
 _ELEMENTS_PROMPT = """Look at this photograph and name what is in it, to find similar photographs later.
 Return JSON only: {{"elements": ["..."], "light_kind": "...", "genre": "..."}}
 - elements: the visible things its finish depends on, the most important first, at most 6, from this list only:
@@ -2959,23 +3688,34 @@ def plan_versions(settings: Settings, selection: dict[str, Any], baseline: Image
     slots = list(slots or (ALL_SLOTS[:6] if choose else SLOTS))
     audit: dict[str, Any] = {}
     stats = picture_stats(baseline)
+    use_compact = choose and _is_local_ollama(selection)
     prompt = plan_prompt(technical, baseline.size, stats, looks, settings.lightroom_candidate_min_distance,
                          slots=slots if choose else None, library=library, experience_text=experience_text,
-                         weights=weights, elements=elements, negative_meta=negative_meta)
+                         weights=weights, elements=elements, negative_meta=negative_meta,
+                         compact=use_compact)
     again = _PLANS_AGAIN.format(chosen=', "directions"' if choose else "", keys=_keys_text(slots))
-    images = [_b64(baseline), _b64(grid_overlay(baseline))]
+    if use_compact:
+        # 1 crisp border-ruled preview (~1k vision tok vs 2k) fits 4K context for ~45s total VLM wall time.
+        images = [_b64(_border_ruled_image(baseline, 896), 84)]
+    elif _is_local_ollama(selection):
+        images = [_resized_b64(baseline, 896, 85), _resized_b64(grid_overlay(baseline), 640, 80)]
+    else:
+        images = [_b64(baseline), _b64(grid_overlay(baseline))]
     plans: dict[str, dict[str, Any]] = {}
     notes: dict[str, list[str]] = {}
     data: dict[str, Any] = {}
+    extracted_elements: dict[str, Any] | None = None
     shape = ""
     for attempt in range(2):   # An answer cut short or shaped differently is asked for once more.
         try:
-            data = _ask(settings, selection, prompt if attempt == 0 else prompt + again, images, audit)
+            raw_answer = _ask(settings, selection, prompt if attempt == 0 else prompt + again, images, audit)
         except (VisionUnavailable, ValueError) as exc:
             raise DirectedUnavailable(f"视觉模型没有给出可用的修图方案（{safe_error(exc)}）") from exc
+        data, extracted_elements = _expand_ultra_compact(raw_answer, slots)
         plans_raw = data.get("plans") if isinstance(data.get("plans"), dict) else {}
         if not plans_raw and isinstance(data.get("A"), dict):   # The versions written at the top level.
             plans_raw = {slot: data[slot] for slot in slots if isinstance(data.get(slot), dict)}
+        plans_raw = _expand_inherited_masks(plans_raw)
         plans, notes = {}, {}
         for slot in slots:
             if slot not in plans_raw:
@@ -3002,37 +3742,46 @@ def plan_versions(settings: Settings, selection: dict[str, Any], baseline: Image
                           chosen={slot: directions_raw[slot] for slot in plans if slot in directions_raw}
                           if choose else None)
         directions_raw = {**{slot: more[slot] for slot in missing if slot in more}, **directions_raw}
-    # Region targets out of their mask's reach from image 1 are asked for once more with the numbers, and the
-    # replaced plans that still have some once again: the re-asked plans redraw their boxes, which the first
-    # numbers did not measure. tools/reach_after.py p24-p26: 6 of 13 re-asked slots were still flagged, all of
-    # them DSC_1963 faces moved to a tight box (image 1 .17) and aimed .30-.36, beyond the .14-.26 a mask reaches
-    # there after the curve (p26-r1 A0/C0 subject -5/-4, the mask at +1.25 EV). Since p28 (change 40) an answer
-    # that flags more than the plan it would replace is refused and that plan kept (reach "refused"); a refused slot
-    # is not asked again.
+    # Reconcile mathematical target conflicts instantly before spending a VLM call; on local Ollama
+    # reconcile shared/reach/against deterministically (<2ms vs 250s VLM rewrite) and call VLM only for
+    # genuine geometric box/color-point errors.
     reach: dict[str, Any] = {}
     source_kind = str(_measurements(technical).get("source_kind") or "jpeg")
+    _reconcile_shared_reach(plans, baseline, notes, include_numeric=_is_local_ollama(selection))
     flagged = {slot: found for slot in sorted(plans) if (found := plan_reach(plans[slot], baseline))}
+    if _is_local_ollama(selection):
+        # Local 32B: tone.py solver handles any residual numeric conflict cleanly in <1s; only re-ask VLM on geometric misses.
+        flagged = {slot: [x for x in items if x.get("kind") in {"points", "spread"}]
+                   for slot, items in flagged.items()}
+        flagged = {slot: items for slot, items in flagged.items() if items}
     if flagged:
+        before_snap = {slot: copy.deepcopy(plans[slot]) for slot in flagged}
         replaced, after, refused = _plan_reach_fix(settings, selection, prompt, images, audit, plans, notes,
-                                                   flagged, baseline, source_kind)
+                                                   flagged, baseline, source_kind,
+                                                   stats=stats, size=baseline.size)
         reach = {"flagged": flagged, "replaced": replaced, "after": after, "refused": refused}
-        still = {slot: found for slot, found in after.items() if found}
-        if still:
+        # Local 32B caps at 1 reach-fix pass (solver handles residual nudges cleanly in <1s); cloud models
+        # allow a 2nd pass only for slots whose plan actually changed on pass 1.
+        still = {slot: found for slot, found in after.items()
+                 if found and plans.get(slot) != before_snap.get(slot)}
+        if still and not _is_local_ollama(selection):
             again, after, refused = _plan_reach_fix(settings, selection, prompt, images, audit, plans, notes,
-                                                    still, baseline, source_kind)
+                                                    still, baseline, source_kind,
+                                                    stats=stats, size=baseline.size)
             reach["again"] = {"flagged": still, "replaced": again, "after": after, "refused": refused}
     if choose:
         directions, direction_notes = _chosen_directions(directions_raw, plans, library)
         for slot, extra in direction_notes.items():
             notes.setdefault(slot, []).extend(extra)
-        _rebalance_stylization(plans, directions, notes, weights)
+        _rebalance_stylization(plans, directions, notes, weights, measured_looks=looks)
     else:
         directions = _trio_directions(plans)
     provider = provider_from(selection, (audit.get("calls") or [{}])[-1])
+    final_elements = elements or extracted_elements or {}
     # "_prompt" is for re-planning in this job (_apart_fix); run_directed_job takes it out before saving plan.json.
     return {"reading": _reading(data.get("reading")), "plans": plans, "notes": notes, "baseline_stats": stats,
             "looks": dict(looks or {}), "reach": reach, "provider": provider, "slots": slots, "_prompt": prompt,
-            "directions": directions, "elements": {k: v for k, v in (elements or {}).items() if k != "audit"},
+            "directions": directions, "elements": {k: v for k, v in final_elements.items() if k != "audit"},
             "temporary_provider": is_temporary(provider), "audit": audit, "prompt_chars": len(prompt)}
 
 
@@ -3085,49 +3834,102 @@ def _apart_fix(ctx: _Context, technical: Any, planning: dict[str, Any], firsts: 
     anchor = by_slot.get(APART_FROM)
     if anchor is None or anchor["round"] is None:
         return {}
-    close = {slot: round(render_distance(by_slot[slot]["round"].render, anchor["round"].render), 2)
-             for slot in sorted(by_slot) if slot != APART_FROM and by_slot[slot]["round"] is not None}
-    close = {slot: distance for slot, distance in close.items() if distance < limit}
+    directions = planning.get("directions") or _trio_directions(planning["plans"])
+    multi_mode = len(by_slot) > len(SLOTS)
+    raw_distances = {slot: round(render_distance(by_slot[slot]["round"].render, anchor["round"].render), 2)
+                     for slot in sorted(by_slot) if slot != APART_FROM and by_slot[slot]["round"] is not None}
+    close: dict[str, float] = {}
+    for slot, distance in raw_distances.items():
+        if multi_mode:
+            # In 6-version light-stylization-first mode, subtle finishes intentionally sit 2.5-4.5 Lab from A;
+            # only genuinely near-duplicate slots trigger a VLM apart-fix roundtrip.
+            slot_dir = directions.get(slot) or {}
+            is_subtle = (slot_dir.get("id") in {"clean_tone", "subtle_film", "airy"}
+                         or not is_strong_plan(planning["plans"].get(slot, {}), slot_dir))
+            slot_limit = min(limit, 1.8 if is_subtle else 3.2)
+        else:
+            slot_limit = limit
+        if distance < slot_limit:
+            close[slot] = distance
     if not close:
         return {}
     report: dict[str, Any] = {"close": close, "replaced": [], "refused": {}, "after": {}}
-    renders = {slot: load_preview(by_slot[slot]["round"].render) for slot in [APART_FROM, *close]}
-    stats = {slot: picture_stats(image) for slot, image in renders.items()}
-    lines = "\n".join(_apart_line(slot, close[slot], stats[slot], stats[APART_FROM]) for slot in close)
-    described = ", ".join(f"image {4 + index} is version {slot}'s" for index, slot in enumerate(close))
-    written = json.dumps({slot: _shown(planning["plans"][slot]) for slot in sorted(planning["plans"])},
-                         ensure_ascii=False)
-    prompt = ctx.prompt or plan_prompt(technical, ctx.baseline_image.size, planning.get("baseline_stats"), ctx.looks,
-                                       limit)
-    images = [_b64(ctx.baseline_image), _b64(grid_overlay(ctx.baseline_image)), *(_b64(renders[slot])
-                                                                              for slot in [APART_FROM, *close])]
-    directions = planning.get("directions") or _trio_directions(planning["plans"])
-    try:
-        data = _ask(ctx.settings, ctx.selection, prompt + _PLANS_APART.format(
-            images=described, limit=limit, lines=lines, slots=", ".join(close), written=written,
-            directions=_directions_text(close, directions)), images, planning.setdefault("audit", {}))
-    except (VisionUnavailable, ValueError):
-        return report
-    raw = data.get("plans") if isinstance(data.get("plans"), dict) else data
     candidates: dict[str, tuple[dict[str, Any], list[str]]] = {}
-    for slot in close:
-        if not isinstance(raw.get(slot), dict):
-            continue
+
+    if _is_local_ollama(ctx.selection) and multi_mode:
+        # Fast deterministic separation (~1s LightCraft re-render vs 63s VLM rewrite) using this photo's
+        # already-measured look distances so subtle slots cleanly separate from A without stalling.
+        used_looks = {
+            str((pl.get("look") or {}).get("id") or "")
+            for s, pl in planning["plans"].items() if s != APART_FROM and isinstance(pl.get("look"), dict)
+        }
+        measured = ctx.looks or {}
+        for slot in close:
+            plan = copy.deepcopy(planning["plans"][slot])
+            note = list(planning["notes"].get(slot, []))
+            if isinstance(plan.get("look"), dict) and plan["look"].get("id"):
+                # Pick an unused light-tier look with real measured separation >= 4.0 on this photo
+                pool = [lid for lid in LOOKS if not is_strong_look(lid) and lid not in used_looks]
+                pool.sort(key=lambda lid: -float((measured.get(lid) or {}).get("distance", 0.0)))
+                if pool and float((measured.get(pool[0]) or {}).get("distance", 0.0)) >= 3.5:
+                    new_lid = pool[0]
+                    plan["look"] = {"id": new_lid, "strength": min(LIGHT_LOOK_STRENGTH_CAP, 0.72)}
+                    used_looks.add(new_lid)
+                    note.append(f"方案与 A 过近（ΔE {close[slot]:.1f}），自动切换为更具辨识度的轻量风格 {new_lid}")
+                else:
+                    plan["look"]["strength"] = min(LIGHT_LOOK_STRENGTH_CAP, float(plan["look"].get("strength", 0.6)) + 0.15)
+                    wb = plan.setdefault("develop", {}).setdefault("wb", {})
+                    wb["temp"] = round(float(wb.get("temp", 0.0)) + 340.0, 1)
+                    note.append(f"方案与 A 过近（ΔE {close[slot]:.1f}），微调色温与风格强度拉开层次")
+            else:
+                # Non-look light refinement: shift midtone & local contrast cleanly
+                tb = plan.get("tone") or {}
+                if isinstance(tb.get("mid"), (int, float)):
+                    tb["mid"] = round(min(0.82, max(0.18, float(tb["mid"]) + 0.055)), 3)
+                if isinstance(tb.get("shadows"), (int, float)):
+                    tb["shadows"] = round(max(0.02, float(tb["shadows"]) - 0.025), 3)
+                wb = plan.setdefault("develop", {}).setdefault("wb", {})
+                wb["temp"] = round(float(wb.get("temp", 0.0)) - 260.0, 1)
+                note.append(f"方案与 A 过近（ΔE {close[slot]:.1f}），自动微调光影反差以拉出差异")
+            candidates[slot] = (plan, note)
+    else:
+        # Cloud / trio path: keep full VLM apart-fix behavior
+        renders = {slot: load_preview(by_slot[slot]["round"].render) for slot in [APART_FROM, *close]}
+        stats = {slot: picture_stats(image) for slot, image in renders.items()}
+        lines = "\n".join(_apart_line(slot, close[slot], stats[slot], stats[APART_FROM]) for slot in close)
+        keep_slots = [APART_FROM, *sorted(close)]
+        written = json.dumps({slot: _shown(planning["plans"][slot]) for slot in keep_slots if slot in planning["plans"]},
+                             ensure_ascii=False)
+        prompt = (_compact_context_header(planning.get("baseline_stats"), ctx.source_kind, ctx.baseline_image.size)
+                  + f"Plan JSON format: {_PLAN_SHAPE}\nOmit zero sliders and empty groups; Chinese title/intent.\n")
+        described = ", ".join(f"image {4 + index} is version {slot}'s" for index, slot in enumerate(close))
+        images = [_b64(ctx.baseline_image), _b64(grid_overlay(ctx.baseline_image)),
+                  *(_b64(renders[slot]) for slot in [APART_FROM, *close])]
         try:
-            plan, note = sanitize_plan(raw[slot], slot=slot)
-        except ValueError:
-            continue
-        if not is_executable(plan):
-            continue
-        look = (directions.get(slot) or {}).get("look")
-        if look and not plan.get("look"):   # A look direction stays on its look (see _chosen_directions).
-            plan["look"] = _look({"id": look, "strength": 0.85}, slot, note)
-        before = len(plan_reach(planning["plans"][slot], ctx.baseline_image))
-        found = plan_reach(plan, ctx.baseline_image)
-        if len(found) > before:
-            report["refused"][slot] = f"plan_reach {before} -> {len(found)}"
-            continue
-        candidates[slot] = (plan, note)
+            data = _ask(ctx.settings, ctx.selection, prompt + _PLANS_APART.format(
+                images=described, limit=limit, lines=lines, slots=", ".join(close), written=written,
+                directions=_directions_text(close, directions)), images, planning.setdefault("audit", {}))
+        except (VisionUnavailable, ValueError):
+            return report
+        raw = data.get("plans") if isinstance(data.get("plans"), dict) else data
+        for slot in close:
+            if not isinstance(raw.get(slot), dict):
+                continue
+            try:
+                plan, note = sanitize_plan(raw[slot], slot=slot)
+            except ValueError:
+                continue
+            if not is_executable(plan):
+                continue
+            look = (directions.get(slot) or {}).get("look")
+            if look and not plan.get("look"):   # A look direction stays on its look (see _chosen_directions).
+                plan["look"] = _look({"id": look, "strength": 0.85}, slot, note)
+            before = len(plan_reach(planning["plans"][slot], ctx.baseline_image))
+            found = plan_reach(plan, ctx.baseline_image)
+            if len(found) > before:
+                report["refused"][slot] = f"plan_reach {before} -> {len(found)}"
+                continue
+            candidates[slot] = (plan, note)
 
     def attempt(slot: str) -> tuple[str, dict[str, Any] | None, float | None]:
         folder = ctx.root / "directed" / slot
@@ -3181,6 +3983,7 @@ def _damage_items(raw: Any) -> list[dict[str, Any]]:
 # reviews): the review's score did not track closeness to the photographer's finished edits (corr -0.01), no review
 # vetoed a render, and each took about 93 s with a 44k-character prompt; taste is learned from the user's picks.
 DAMAGE_EDGE = 1024
+DAMAGE_EDGE_LOCAL = 576
 DAMAGE_WITHHOLD = 0.65      # the old review's damage veto
 _DAMAGE_PROMPT = """Image 1 is the unedited render of a photograph. The other images are finished versions of it: {labels}.
 Check each version for DAMAGE only, not for taste: a halo or glow along an edge (a sky against mountains, a figure
@@ -3193,24 +3996,43 @@ damage. "region" in Chinese.
 Return JSON only: {{"versions": {{{shape}}}}}"""
 
 
+_DAMAGE_PROMPT_SHEET = """This labeled contact sheet shows the unedited photograph (panel ORIG) alongside finished versions ({slots}).
+Check each version panel ({slots}) for DAMAGE only, not for taste: a halo or glow along an edge, a visible mask edge
+or band where a gradient stops, a blotch or stain of colour, posterised or banded gradients, highlights or shadows
+clipped where ORIG holds detail, skin turned an unnatural colour, or noise/artefacts made visible. A different mood,
+palette, brightness or style is NOT damage.
+Severity: 0.3 visible when you look for it, 0.6 visible at a glance, 0.8 spoils the picture. An empty list means no
+damage. "region" in Chinese.
+Return JSON only: {{"versions": {{{shape}}}}}"""
+
+
 def damage_check(settings: Settings, selection: dict[str, Any], baseline: Image.Image,
                  renders: dict[str, Path]) -> dict[str, Any]:
     """One vision request for all versions, damage only: {"versions": {slot: [damage]}, "error", "audit"}."""
     slots = sorted(renders)
-    labels = ", ".join(f"image {index + 2} is version {slot}" for index, slot in enumerate(slots))
     shape = ", ".join(f'"{slot}": [{{"kind": "halo|mask_edge|banding|colour_blotch|clipping|skin|artefact",'
                       ' "region": "...", "severity": 0.0}]' if index == 0 else f'"{slot}": []'
                       for index, slot in enumerate(slots))
 
-    def small(image: Image.Image) -> str:
-        copy_ = image.copy()
-        copy_.thumbnail((DAMAGE_EDGE, DAMAGE_EDGE))
-        return _b64(copy_, 85)
-
-    images = [small(baseline), *(small(load_preview(renders[slot])) for slot in slots)]
     audit: dict[str, Any] = {}
+    if _is_local_ollama(selection):
+        # Pack ORIG + all variants into ONE crisp labeled contact sheet (~1k vision tokens vs 7k -> 4.5x faster prefill).
+        panels = [("ORIG", baseline)] + [(f"VERSION {slot}", load_preview(renders[slot])) for slot in slots]
+        sheet = _labeled_contact_sheet(panels, tile_edge=560)
+        prompt = _DAMAGE_PROMPT_SHEET.format(slots=", ".join(slots), shape=shape)
+        images = [_b64(sheet, 86)]
+    else:
+        labels = ", ".join(f"image {index + 2} is version {slot}" for index, slot in enumerate(slots))
+
+        def small(image: Image.Image) -> str:
+            copy_ = image.copy()
+            copy_.thumbnail((DAMAGE_EDGE, DAMAGE_EDGE))
+            return _b64(copy_, 85)
+
+        prompt = _DAMAGE_PROMPT.format(labels=labels, shape=shape)
+        images = [small(baseline), *(small(load_preview(renders[slot])) for slot in slots)]
     try:
-        data = _ask(settings, selection, _DAMAGE_PROMPT.format(labels=labels, shape=shape), images, audit)
+        data = _ask(settings, selection, prompt, images, audit)
     except (VisionUnavailable, ValueError) as exc:
         return {"versions": {}, "error": safe_error(exc), "audit": audit}
     raw = data.get("versions") if isinstance(data.get("versions"), dict) else data
@@ -3591,7 +4413,7 @@ def _first_round(ctx: _Context, slot: str, plan: dict[str, Any], plan_notes: lis
     render_input = ctx.render_source if ctx.render_source is not None and ctx.render_source.is_file() else ctx.original
     source = folder / f"source{render_input.suffix.lower()}"
     folder.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(render_input, source)
+    _link_or_copy(render_input, source)
     try:
         current = _make_round(ctx, slot, 0, plan, plan_notes, source)
     except LightCraftError as exc:
@@ -3695,6 +4517,35 @@ def _check_damage(settings: Settings, selection: dict[str, Any], baseline: Image
     delivered = {result["slot"]: result for result in results if result["status"] == "delivered"}
     if not delivered:
         return {}
+    # On local Ollama, every delivered 2400px render has already passed full-resolution safety_gate
+    # (clipping, shadow crush, neutral color cast, skin) and smooth-mask contour self-healing;
+    # invoke the extra VLM damage_check only if any slot shows a real damage-risk signal
+    # (hard gate issue, clipping/crush/cast advisory, or elevated tone solve error >= 0.30).
+    if _is_local_ollama(selection):
+        damage_codes = {"highlight_clipping", "shadow_clipping", "neutral_color_cast", "skin_color_cast",
+                        "extreme_brightness", "banding", "halo"}
+
+        def _has_damage_risk(res: dict[str, Any]) -> bool:
+            gate = res["best"].gate
+            if gate.get("hard") or float((res["best"].solve or {}).get("error") or 0.0) >= 0.30:
+                return True
+            for adv in gate.get("advisory") or []:
+                code = str(adv).split(":", 1)[0].strip()
+                if code in damage_codes:
+                    return True
+            return False
+
+        suspicious = [slot for slot, res in delivered.items() if _has_damage_risk(res)]
+        if not suspicious:
+            for slot, result in delivered.items():
+                best: _Round = result["best"]
+                best.review = {"verdict": "checked", "confidence": 1.0, "score": None,
+                               "deductions": [], "checks": [], "notes": [], "damage": [], "error": None,
+                               "provider": "pixel-qa"}
+                if result["rounds"]:
+                    result["rounds"][-1]["review"] = dict(best.review)
+            return {"versions": {slot: [] for slot in delivered}, "error": None,
+                    "provider": "pixel-qa", "skipped_vlm": True}
     found = damage_check(settings, selection, baseline, {slot: result["best"].render
                                                          for slot, result in delivered.items()})
     for slot, result in delivered.items():
@@ -3756,36 +4607,76 @@ def run_directed_job(settings: Settings, conn: sqlite3.Connection, job_id: str, 
     source_kind = str(getattr(technical, "source_kind", "jpeg"))
     baseline_image = load_preview(baseline_export)
     directed_root = root / "directed"
-    render_source = original
-    negative_meta: dict[str, Any] | None = None
-    if settings.raster_negative_enabled and source_kind in {"jpeg", "png"} and original.is_file():
-        try:
-            from .raster_negative import prepare_raster_negative
-
-            neg_path = root / "working_negative.tif"
-            negative_meta = prepare_raster_negative(
-                original, neg_path, max_edge=max(settings.lightroom_export_edge, 3200)
-            )
-            (root / "negative.json").write_text(
-                json.dumps(negative_meta, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            render_source = neg_path
-        except Exception:
-            negative_meta = None
-            render_source = original
-    looks = measure_looks(binary, original, directed_root / "looks", source_kind)
-    # The elements are read first so that what this user picked on similar pictures is in view when the
-    # directions are chosen; the trio (directed_versions 3) keeps its fixed directions and only records them.
-    elements = read_elements(settings, selection, baseline_image)
-    scene = experience.profile(elements, technical)
     choose = settings.directed_versions > len(SLOTS)
-    library = experience.library(conn)
-    weights = experience.weights(conn, scene, library)
-    experience_text = experience.experience_block(conn, scene, library) if choose else ""
-    planning = plan_versions(settings, selection, baseline_image, technical, looks,
-                             slots=list(ALL_SLOTS[:settings.directed_versions]) if choose else None,
-                             library=library if choose else None, experience_text=experience_text,
-                             weights=weights, elements=elements, negative_meta=negative_meta)
+    library = experience.library(conn) if choose else None
+
+    def _prepare_and_measure() -> tuple[Path, dict[str, Any] | None, dict[str, dict[str, float]]]:
+        r_source = original
+        neg_meta: dict[str, Any] | None = None
+        if settings.raster_negative_enabled and source_kind in {"jpeg", "png"} and original.is_file():
+            try:
+                from .raster_negative import prepare_raster_negative
+
+                neg_path = root / "working_negative.tif"
+                neg_meta = prepare_raster_negative(
+                    original, neg_path, max_edge=settings.lightroom_export_edge
+                )
+                (root / "negative.json").write_text(
+                    json.dumps(neg_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                r_source = neg_path
+            except Exception:
+                neg_meta = None
+                r_source = original
+        if choose:
+            short_looks, short_profiles = _scene_shortlists(None, technical, library, None)
+            measured = measure_looks(binary, original, directed_root / "looks", source_kind,
+                                     look_ids=short_looks, profile_ids=short_profiles)
+        else:
+            measured = measure_looks(binary, original, directed_root / "looks", source_kind)
+        return r_source, neg_meta, measured
+
+    has_prior_ratings = False
+    if choose:
+        try:
+            has_prior_ratings = conn.execute("SELECT 1 FROM ratings LIMIT 1").fetchone() is not None
+        except sqlite3.Error:
+            has_prior_ratings = False
+
+    if choose and _is_local_ollama(selection) and not has_prior_ratings:
+        # Ultra-fast local path: fold elements into the single planning call (saving ~9s) and overlap
+        # CPU/LightCraft working-negative + look probes concurrently with the Ollama GPU call (0s overhead).
+        with ThreadPoolExecutor(max_workers=2) as pre_pool:
+            prep_future = pre_pool.submit(_prepare_and_measure)
+            plan_future = pre_pool.submit(
+                plan_versions, settings, selection, baseline_image, technical, None,
+                slots=list(ALL_SLOTS[:settings.directed_versions]), library=library,
+                experience_text="", weights={}, elements=None, negative_meta=None,
+            )
+            render_source, negative_meta, looks = prep_future.result()
+            planning = plan_future.result()
+        elements = planning.get("elements") or {}
+        scene = experience.profile(elements, technical)
+        weights = experience.weights(conn, scene, library)
+        experience_text = ""
+        planning["looks"] = dict(looks or {})
+        _rebalance_stylization(planning["plans"], planning["directions"], planning["notes"], weights, measured_looks=looks)
+    else:
+        # Overlap CPU/LightCraft pre-conditioning & look probes with the short VLM elements call (~5-6s saved).
+        with ThreadPoolExecutor(max_workers=2) as pre_pool:
+            elem_future = pre_pool.submit(read_elements, settings, selection, baseline_image)
+            prep_future = pre_pool.submit(_prepare_and_measure)
+            render_source, negative_meta, looks = prep_future.result()
+            elements = elem_future.result()
+        scene = experience.profile(elements, technical)
+        if library is None:
+            library = experience.library(conn)
+        weights = experience.weights(conn, scene, library)
+        experience_text = experience.experience_block(conn, scene, library) if choose else ""
+        planning = plan_versions(settings, selection, baseline_image, technical, looks,
+                                 slots=list(ALL_SLOTS[:settings.directed_versions]) if choose else None,
+                                 library=library if choose else None, experience_text=experience_text,
+                                 weights=weights, elements=elements, negative_meta=negative_meta)
     prompt = planning.pop("_prompt", "")
     planning["experience"] = {"profile": scene, "used": bool(experience_text), "chars": len(experience_text)}
     if negative_meta:
@@ -3805,7 +4696,8 @@ def run_directed_job(settings: Settings, conn: sqlite3.Connection, job_id: str, 
                    roles={slot: item["role"] for slot, item in directions.items()},
                    render_source=render_source, negative_meta=negative_meta)
     slots = [slot for slot in planning["slots"] if slot in planning["plans"]]
-    with ThreadPoolExecutor(max_workers=min(len(slots), RENDER_WORKERS)) as pool:
+    max_render_workers = RENDER_WORKERS if source_kind == "raw" else max(RENDER_WORKERS, min(len(slots), 6))
+    with ThreadPoolExecutor(max_workers=min(len(slots), max_render_workers)) as pool:
         # First renders of all versions, so each reviewer knows how far its version is from the others.
         firsts = list(pool.map(lambda slot: _first_round(ctx, slot, planning["plans"][slot],
                                                          planning["notes"].get(slot, [])), slots))

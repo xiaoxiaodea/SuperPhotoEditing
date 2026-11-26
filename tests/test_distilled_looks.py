@@ -198,6 +198,15 @@ def test_merged_develop_preserves_unscaled_shape_params_and_local_light_and_mask
     assert merged["grain"]["size"] == pytest.approx(24.0, abs=0.1)
     assert merged["grain"]["roughness"] == pytest.approx(75.0, abs=0.1)
 
+    # Plan sharpening + look sharpening must take max rather than double-stacking to 80+
+    stacked = directed._merged_develop({
+        "develop": {"detail": {"sharpen_amount": 40.0, "nr_luminance": 18.0}},
+        "look": {"id": "cine_teal", "strength": 0.7},
+    })
+    assert stacked["detail"]["sharpen_amount"] <= 46.0
+    assert stacked["detail"]["sharpen_amount"] == pytest.approx(max(40.0, 64.0 * 0.7), abs=0.2)
+    assert stacked["detail"]["nr_luminance"] == pytest.approx(18.0, abs=0.1)
+
 
 def test_strict_8_dimension_quality_audit_catches_blur_banding_and_missing_grain(tmp_path):
     from PIL import Image, ImageFilter
@@ -299,5 +308,119 @@ def test_light_stylization_first_portfolio_shortlist_quota_and_display_order():
     #    while still letting a strongly user-favored strong direction rise to the top.
     assert experience.display_order({"A": 1.0, "B": 1.0, "C": 1.0, "D": 1.0}, strong_slots={"B"}) == ["A", "C", "D", "B"]
     assert experience.display_order({"A": 1.0, "B": 1.8, "C": 1.0}, strong_slots={"B"}) == ["B", "A", "C"]
+
+
+def test_speed_optimizations_mask_inheritance_shared_reconcile_and_shortlist():
+    from types import SimpleNamespace
+    from PIL import Image
+    from superphoto import experience, tone
+
+    # 1. Compact mask inheritance expands cleanly into independent full masks before sanitize_plan
+    plans_raw = {
+        "A": {
+            "title": "自然",
+            "masks": [{
+                "name": "sky", "purpose": "压天空",
+                "shape": {"kind": "linear", "start": {"x": 0.5, "y": 0.0}, "end": {"x": 0.5, "y": 0.4}},
+                "limit": {"kind": "luminance", "lo": 0.7, "hi": 1.0, "feather": 0.05},
+                "adjust": {"dehaze": 10},
+                "target": {"box": [0.2, 0.05, 0.8, 0.3], "median": 0.65},
+            }],
+        },
+        "B": {
+            "title": "通透",
+            "masks": [
+                {"use": "sky", "adjust": {"dehaze": 18}, "target": {"median": 0.60}},
+            ],
+        },
+    }
+    expanded = directed._expand_inherited_masks(plans_raw)
+    mask_b = expanded["B"]["masks"][0]
+    assert mask_b["name"] == "sky"
+    assert mask_b["shape"] == plans_raw["A"]["masks"][0]["shape"]
+    assert mask_b["limit"] == plans_raw["A"]["masks"][0]["limit"]
+    assert mask_b["adjust"] == {"dehaze": 18}
+    assert mask_b["target"] == {"box": [0.2, 0.05, 0.8, 0.3], "median": 0.60}
+
+    # 2. Pure mathematical `shared` contradiction is reconciled deterministically without a VLM roundtrip
+    arr = np.full((128, 128, 3), 235, dtype=np.uint8)
+    arr[70:, :] = 50
+    img = Image.fromarray(arr)
+    anchors = tone.measure(tone.load_small(img))
+    plan_shared = {
+        "title": "A",
+        "tone": {k: round(float(v), 3) for k, v in anchors.items()},
+        "masks": [{
+            "name": "sky", "purpose": "压天空",
+            "shape": {"kind": "linear", "start": {"x": 0.5, "y": 0.0}, "end": {"x": 0.5, "y": 0.55}},
+            "adjust": {"dehaze": 10},
+            "target": {"box": [0.2, 0.05, 0.8, 0.35], "median": 0.72},
+        }],
+    }
+    assert any(item["kind"] == "shared" for item in directed.plan_reach(plan_shared, img))
+    plans = {"A": plan_shared}
+    notes: dict[str, list[str]] = {}
+    reconciled = directed._reconcile_shared_reach(plans, img, notes)
+    assert reconciled == ["A"]
+    assert not any(item["kind"] == "shared" for item in directed.plan_reach(plans["A"], img))
+
+    # 3. 6-version prompt uses scene-shortlisted looks (10) & profiles (5) instead of dumping all 35 + 15
+    tech = SimpleNamespace(model_dump=lambda: {"source_kind": "jpeg", "width": 1800, "height": 3200, "mean_luma": 0.45})
+    full_prompt = directed.plan_prompt(tech, (1800, 3200))
+    multi_prompt = directed.plan_prompt(tech, (1800, 3200), library=experience.library())
+    # Even with the ~6k DIRECTION LIBRARY included, shortlisted multi_prompt is much shorter than unshortlisted full_prompt
+    assert len(multi_prompt) < len(full_prompt) - 5000
+    assert "OUTPUT COMPACTNESS" in multi_prompt
+
+    # 4. Labeled contact sheet packs 7 vertical frames into 1 compact image for local Ollama damage_check
+    panels = [("ORIG", img)] + [(f"VERSION {s}", img) for s in "ABCDEF"]
+    sheet = directed._labeled_contact_sheet(panels, tile_edge=320)
+    assert sheet.mode == "RGB" and sheet.width == 4 * 320 and sheet.height == 2 * (320 + 28)
+
+    # 5. subtle_film with missing look automatically receives an unused light-tier film look,
+    #    and duplicate look IDs across sibling slots are deduplicated deterministically.
+    sf_plans = {
+        "A": {"title": "自然"},
+        "B": {"title": "青橙", "look": {"id": "cine_teal", "strength": 0.65}},
+        "C": {"title": "轻量胶片", "develop": {"detail": {"sharpen_amount": 38}}},
+        "D": {"title": "青橙2", "look": {"id": "cine_teal", "strength": 0.70}},
+    }
+    sf_dirs = {
+        "A": {"id": "natural", "title": "自然"},
+        "B": {"id": "look:cine_teal", "title": "青橙"},
+        "C": {"id": "subtle_film", "title": "轻量胶片"},
+        "D": {"id": "look:cine_teal", "title": "青橙"},
+    }
+    sf_notes: dict[str, list[str]] = {}
+    directed._rebalance_stylization(sf_plans, sf_dirs, sf_notes, measured_looks={"vintage_olive": {"distance": 5.8}})
+    assert sf_plans["C"].get("look") is not None and not looks.is_strong_look(sf_plans["C"]["look"]["id"])
+    assert sf_plans["D"]["look"]["id"] != sf_plans["B"]["look"]["id"]
+
+    # 6. Ultra-compact integer delta schema expands losslessly into standard reading, directions, plans & elements
+    compact_raw = {
+        "r": {"sc": "雾天城市", "g": "landscape", "sb": "高楼与道路", "box": [10, 20, 90, 80],
+              "lt": "阴天散射光", "el": ["sky", "mist", "building"], "lk": "fog",
+              "pr": ["画面偏灰"], "ps": ["远处高楼"]},
+        "A": {"t": "自然通透", "w": "清晰还原", "tn": [3, 14, 48, 82, 96, 58],
+              "dev": {"color": {"vibrance": 6}, "detail": {"sharpen_amount": 38}},
+              "ms": [{"n": "sky", "p": "压雾", "s": ["lin", 50, 0, 50, 40],
+                      "l": ["lum", 70, 100, 5], "a": {"dehaze": 12}, "tg": [20, 5, 80, 30, 74]}]},
+        "v": {
+            "B": {"d": "clean_tone", "t": "清透光影", "w": "通透立体", "tn": [1, 10, 52, 86, 98, 56],
+                  "mm": {"sky": {"a": {"dehaze": 18}, "m": 70}}},
+            "C": {"d": "subtle_film", "t": "轻量胶片", "w": "暖调胶片", "tn": [4, 16, 48, 82, 95, 55],
+                  "lk": ["vintage_olive", 0.62]},
+        },
+    }
+    std, ext_el = directed._expand_ultra_compact(compact_raw, ["A", "B", "C"])
+    assert ext_el is not None and ext_el["light_kind"] == "fog" and "sky" in ext_el["elements"]
+    assert std["plans"]["A"]["tone"]["mid"] == pytest.approx(0.48) and std["plans"]["A"]["tone"]["chroma"] == pytest.approx(5.8)
+    # Regression guard: integer `1` in a 0..100 tone array must expand to 0.01 (NOT 1.0 pure white!)
+    assert std["plans"]["B"]["tone"]["black"] == pytest.approx(0.01) and std["plans"]["B"]["tone"]["white"] == pytest.approx(0.98)
+    assert std["plans"]["A"]["masks"][0]["shape"] == {"kind": "linear", "start": {"x": 0.5, "y": 0.0}, "end": {"x": 0.5, "y": 0.4}}
+    assert std["plans"]["B"]["masks"][0]["adjust"]["dehaze"] == 18 and std["plans"]["B"]["masks"][0]["target"]["median"] == pytest.approx(0.70)
+    assert std["plans"]["C"]["look"] == {"id": "vintage_olive", "strength": 0.62}
+    assert std["plans"]["C"]["develop"]["detail"]["sharpen_amount"] == 38
+
 
 

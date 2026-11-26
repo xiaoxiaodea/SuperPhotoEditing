@@ -78,6 +78,22 @@ def pick_model(preferred: str, names: list[str]) -> str | None:
     return None
 
 
+def _estimate_vision_tokens(image_list: list[str], image_audits: list[dict[str, Any]] | None = None) -> int:
+    """Estimate Qwen3-VL / ViT patch tokens (~28x28 px per token) without decoding when audit is disabled."""
+    if image_audits is not None:
+        total = 0
+        for info in image_audits:
+            w = info.get("width")
+            h = info.get("height")
+            if isinstance(w, int) and isinstance(h, int) and w > 0 and h > 0:
+                total += max(128, ((w + 27) // 28) * ((h + 27) // 28) + 64)
+            else:
+                total += 1024
+        return total
+    # Fast heuristic from JPEG base64 length when audit is None (skips PIL decode).
+    return sum(max(256, min(1536, len(encoded) // 120 + 256)) for encoded in image_list)
+
+
 def chat_vision(settings: Settings, model: str, prompt: str, image_b64: str | list[str],
                 *, response_schema: dict | None = None, audit: dict | None = None) -> str:
     """Return completed assistant text, optionally recording a caller-owned audit.
@@ -87,12 +103,39 @@ def chat_vision(settings: Settings, model: str, prompt: str, image_b64: str | li
     a rejected or incomplete answer can still be investigated by the caller.
     """
     image_list = [image_b64] if isinstance(image_b64, str) else list(image_b64)
-    # A single 1280px VL preview + legacy critique prompt fits in 16k/4k, but
-    # multi-version directed planning (~38k chars + 2 images) or batched damage
-    # checks (7 images) exceed 16k and truncate JSON (done_reason=length).
-    est_prompt_tokens = len(prompt) // 3 + len(image_list) * 2048
-    num_predict = 8192 if len(prompt) > 12000 else 4096
-    num_ctx = 32768 if (est_prompt_tokens + num_predict) > 14000 else 16384
+    image_audits = (
+        [_image_audit(encoded, index) for index, encoded in enumerate(image_list)]
+        if audit is not None else None
+    )
+
+    # Accurate token budget keeps routine calls on the tightest safe power-of-two/step num_ctx
+    # (4096 for ultra-compact local planning & single-sheet damage_check -> fastest attention & decode,
+    # zero KV reallocation reloads between calls) while upgrading cleanly whenever larger prompts need it.
+    # Measured on qwen3-vl:32b: mixed EN/ZH prompts average ~0.30 tokens/char.
+    est_text_tokens = int(len(prompt) * 0.32) + 200
+    est_prompt_tokens = est_text_tokens + _estimate_vision_tokens(image_list, image_audits)
+    if '"v":{"B":' in prompt:
+        num_predict = 1280
+    elif '"plans":' in prompt or len(prompt) > 10000:
+        num_predict = 4096
+    elif len(prompt) < 1600:
+        num_predict = 512
+    else:
+        num_predict = 2560
+    needed = est_prompt_tokens + num_predict
+    if needed <= 3900:
+        num_ctx = 4096
+    elif needed <= 7900:
+        num_ctx = 8192
+    elif needed <= 16000:
+        num_ctx = 16384
+    elif needed <= 24000:
+        num_ctx = 24576
+    else:
+        num_ctx = 32768
+
+    # Note: keep single user message (Ollama qwen3-vl with format=json + think=false drops done=True
+    # mid-stream when a separate system role message is prepended).
     payload = {
         "model": model,
         "stream": False,
@@ -118,8 +161,7 @@ def chat_vision(settings: Settings, model: str, prompt: str, image_b64: str | li
                 "think": payload["think"],
                 "stream": payload["stream"],
                 "keep_alive": payload["keep_alive"],
-                "images": [_image_audit(encoded, index) for index, encoded
-                           in enumerate(payload["messages"][0]["images"])],
+                "images": image_audits,
             },
             http_status=None,
             response=None,

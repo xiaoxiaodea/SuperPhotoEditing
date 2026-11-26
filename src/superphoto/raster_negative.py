@@ -285,14 +285,57 @@ def extract_gain_map(path: Path, base_size: tuple[int, int]) -> dict[str, Any] |
 
 
 def apply_gain_map(linear_sdr: np.ndarray, gm: dict[str, Any]) -> np.ndarray:
-    """ISO 21496-1 linear float HDR reconstruction from SDR linear pixels + Gain Map."""
+    """SDR-preserving ISO 21496-1 linear float HDR highlight headroom reconstruction.
+
+    Smartphone Ultra HDR / Apple Adaptive HDR JPEGs store a complete tone-mapped SDR
+    rendition plus a display-boost Gain Map meant to make bright skies and highlights glow
+    2-3 stops brighter on HDR OLED screens. LightCraft renders a float32 TIFF into SDR
+    [0..1] at exposure 0: applying the full display gain globally blows unclipped misty
+    skies and distant skylines to flat clipped white, while a hard shoulder against a raw
+    4-5x boost creates a steep slope cliff (jagged white crater) whenever sky exposure or
+    highlights are pulled down.
+
+    Instead:
+    1. All unclipped SDR pixels (cmax <= 0.95 linear) remain strictly identical (0.00 diff).
+    2. If the SDR frame has no meaningful clipped white highlight slab (< 0.2% of pixels at
+       cmax >= 0.992), the Gain Map is pure display luminance lift with nothing clipped to
+       recover -> return linear_sdr untouched.
+    3. When a genuine clipped white region exists, subtract the unclipped bright border's
+       gain baseline (98th percentile of log_boost on 0.84 <= cmax <= 0.975, or 90th
+       percentile of ~hard_clip when the clipped region meets dark edges directly). Only
+       the strictly excess HDR headroom inside the clipped core is smoothly ramped in across
+       cmax in [0.95, 0.995], guaranteeing C0 continuity at the clip boundary with zero
+       blowout and zero crater.
+    """
+    cmax = linear_sdr.max(axis=-1)
+    hard_clip = cmax >= 0.992
+    if float(np.mean(hard_clip)) < 0.002:
+        return linear_sdr.astype(np.float32, copy=False)
+
     g = np.clip(gm["map"], 0.0, 1.0)
     if abs(gm["gamma"] - 1.0) > 1e-4:
         g = np.power(np.maximum(g, 0.0), 1.0 / gm["gamma"])
-    log_boost = gm["min_stops"] * (1.0 - g) + gm["max_stops"] * g
-    boost = np.power(2.0, log_boost).astype(np.float32)[..., None]
-    hdr = (linear_sdr + gm["offset_sdr"]) * boost - gm["offset_hdr"]
-    return np.clip(hdr, 0.0, MAX_GAIN_MAP_HEADROOM).astype(np.float32)
+    log_boost = (gm["min_stops"] * (1.0 - g) + gm["max_stops"] * g).astype(np.float32)
+
+    border = (cmax >= 0.84) & (cmax <= 0.975)
+    if float(np.mean(border)) >= 0.005:
+        log_floor = float(np.percentile(log_boost[border], 98))
+    elif np.any(~hard_clip):
+        log_floor = max(0.0, float(np.percentile(log_boost[~hard_clip], 90)))
+    else:
+        log_floor = 0.0
+
+    excess_log = np.maximum(0.0, log_boost - log_floor)
+    if float(np.percentile(excess_log[hard_clip], 95)) < 0.20:
+        return linear_sdr.astype(np.float32, copy=False)
+
+    boost = np.power(2.0, excess_log).astype(np.float32)[..., None]
+    hdr_excess = np.clip((linear_sdr + gm["offset_sdr"]) * boost - gm["offset_hdr"], 0.0, MAX_GAIN_MAP_HEADROOM)
+    # Smoothstep shoulder mask: 0.0 for all unclipped pixels (cmax <= 0.95), 1.0 at SDR clip (cmax >= 0.995)
+    t = np.clip((cmax - 0.95) / 0.045, 0.0, 1.0)
+    shoulder = (t * t * (3.0 - 2.0 * t)).astype(np.float32)[..., None]
+    out = linear_sdr + (np.maximum(hdr_excess, linear_sdr) - linear_sdr) * shoulder
+    return np.clip(out, 0.0, MAX_GAIN_MAP_HEADROOM).astype(np.float32)
 
 
 def condition_srgb(srgb: np.ndarray, kind: str, quality: dict[str, float], *,
@@ -517,13 +560,17 @@ def prepare_raster_negative(source: Path, dest: Path, *, max_edge: int = 0) -> d
     cleaned_srgb, cond = condition_srgb(srgb, kind, quality, bit_depth=bit_depth)
     linear = srgb_to_linear(cleaned_srgb).astype(np.float32)
 
-    has_gain_map = gain_map is not None
+    has_gain_map = False
     gain_map_stops = 0.0
     reconstructed_pct = 0.0
-    if has_gain_map and gain_map is not None:
-        linear = apply_gain_map(linear, gain_map)
-        gain_map_stops = round(float(gain_map["max_stops"]), 2)
-    else:
+    if gain_map is not None:
+        linear_gm = apply_gain_map(linear, gain_map)
+        gm_headroom = float(np.percentile(linear_gm, 99.9)) if linear_gm.size else 1.0
+        if gm_headroom > 1.15:
+            linear = linear_gm
+            has_gain_map = True
+            gain_map_stops = round(min(float(gain_map["max_stops"]), math.log2(max(gm_headroom, 1.0))), 2)
+    if not has_gain_map:
         linear, reconstructed_pct = reconstruct_partial_highlights(linear)
 
     write_f32_tiff(dest, linear)

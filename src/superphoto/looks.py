@@ -1057,11 +1057,13 @@ PROFILES: dict[str, dict[str, str]] = {
 }
 
 
-def profile_lines(notes: dict[str, str] | None = None) -> list[str]:
+def profile_lines(notes: dict[str, str] | None = None, profile_ids: Iterable[str] | None = None) -> list[str]:
     """One line per profile for a planning prompt, followed by ``notes[profile_id]`` where given."""
     notes = notes or {}
-    return [f"{profile_id} ({spec['title']}): {spec['use']}" + (f" {notes[profile_id]}" if profile_id in notes else "")
-            for profile_id, spec in PROFILES.items()]
+    ids = [pid for pid in profile_ids if pid in PROFILES] if profile_ids is not None else list(PROFILES.keys())
+    return [f"{profile_id} ({PROFILES[profile_id]['title']}): {PROFILES[profile_id]['use']}"
+            + (f" {notes[profile_id]}" if profile_id in notes else "")
+            for profile_id in ids]
 
 
 def _tone_hint(shifts: dict[str, float]) -> str:
